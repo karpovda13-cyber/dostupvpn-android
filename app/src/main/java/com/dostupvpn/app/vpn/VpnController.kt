@@ -40,6 +40,11 @@ class VpnController(private val context: Context, private val api: ApiClient) {
         sessionStore.clear()
         try {
             val session = withContext(Dispatchers.IO) { api.sessionStart() }
+            // Правила админа: сервер уже доступен (сессия создана). Ошибка не критична —
+            // используем то, что закешировано с прошлого раза.
+            withContext(Dispatchers.IO) {
+                runCatching { AdminRulesStore.update(context, api.rules(AdminRulesStore.version(context))) }
+            }
             val config = try {
                 withContext(Dispatchers.IO) { XrayConfig.build(context, session) }
             } catch (e: Exception) {

@@ -17,6 +17,43 @@ object XrayConfig {
 
     const val TUN_MTU = 1500
 
+    /**
+     * Российские домены: идут напрямую. Список geosite-кодов должен совпадать с GEOSITE_KEEP
+     * в tools/trim_geo.py — в урезанном geosite.dat других кодов нет, и Xray на них не запустится.
+     */
+    private val RU_DOMAINS = listOf(
+        "geosite:2gis",
+        "geosite:avito",
+        "geosite:category-bank-ru",
+        "geosite:category-ecommerce-ru",
+        "geosite:category-education-ru",
+        "geosite:category-entertainment-ru",
+        "geosite:category-gov-ru",
+        "geosite:category-media-ru",
+        "geosite:category-medicine-ru",
+        "geosite:category-retail-ru",
+        "geosite:category-ru",
+        "geosite:category-travel-ru",
+        "geosite:dzen",
+        "geosite:kinopoisk",
+        "geosite:mailru",
+        "geosite:megafon",
+        "geosite:mts-ru",
+        "geosite:ok",
+        "geosite:ozon",
+        "geosite:rutube",
+        "geosite:sber",
+        "geosite:t2-ru",
+        "geosite:tbank-ru",
+        "geosite:tld-ru",
+        "geosite:vk",
+        "geosite:wildberries",
+        "geosite:yandex",
+        "domain:ru",
+        "domain:su",
+        "domain:xn--p1ai", // .рф
+    )
+
     /** Итоговые параметры подключения (то, что реально попадает в конфиг). */
     private data class Params(
         val host: String,
@@ -34,7 +71,9 @@ object XrayConfig {
 
     fun build(context: Context, session: SessionInfo): String {
         val (params, diffs) = resolve(session)
-        writeDebug(context, params, diffs)
+        GeoAssets.ensure(context)
+        val rules = AdminRulesStore.load(context)
+        writeDebug(context, params, diffs, rules)
 
         val log = logFile(context).also { runCatching { it.delete() } }
 
@@ -76,6 +115,9 @@ object XrayConfig {
         val sniffing = JSONObject()
             .put("enabled", true)
             .put("destOverride", JSONArray().put("http").put("tls").put("quic"))
+            // Домен из SNI/Host используется только для выбора маршрута, а соединение идёт на
+            // исходный IP. Иначе правило geoip:ru не увидело бы адрес назначения.
+            .put("routeOnly", true)
 
         val tun = JSONObject()
             .put("tag", "tun")
@@ -99,11 +141,37 @@ object XrayConfig {
                     .put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
                     .put(JSONObject().put("tag", "block").put("protocol", "blackhole")),
             )
-            .put(
-                "routing",
-                JSONObject().put("domainStrategy", "AsIs").put("rules", JSONArray()),
-            )
+            .put("routing", routing(rules))
         return root.toString()
+    }
+
+    /**
+     * Порядок важен (побеждает первое совпавшее правило):
+     *  1) правила администратора «через VPN» — перекрывают российские списки;
+     *  2) правила администратора «напрямую»;
+     *  3) локальные сети — напрямую;
+     *  4) российские домены и IP — напрямую;
+     *  всё остальное — в VPN (первый outbound, "proxy").
+     */
+    private fun routing(rules: AdminRules): JSONObject {
+        fun rule(key: String, values: List<String>, outbound: String): JSONObject? =
+            if (values.isEmpty()) null else JSONObject()
+                .put("type", "field")
+                .put(key, JSONArray(values))
+                .put("outboundTag", outbound)
+
+        val list = listOfNotNull(
+            rule("domain", rules.proxyDomains, "proxy"),
+            rule("ip", rules.proxyIps, "proxy"),
+            rule("domain", rules.directDomains, "direct"),
+            rule("ip", rules.directIps, "direct"),
+            rule("ip", listOf("geoip:private"), "direct"),
+            rule("domain", RU_DOMAINS, "direct"),
+            rule("ip", listOf("geoip:ru"), "direct"),
+        )
+        return JSONObject()
+            .put("domainStrategy", "AsIs")
+            .put("rules", JSONArray(list))
     }
 
     /**
@@ -150,7 +218,7 @@ object XrayConfig {
     private fun mask(v: String) = if (v.length <= 8) v else v.take(8) + "…(len=${v.length})"
 
     /** Параметры без секретов целиком — для сверки с рабочей ссылкой. */
-    private fun writeDebug(context: Context, p: Params, diffs: List<String>) {
+    private fun writeDebug(context: Context, p: Params, diffs: List<String>, rules: AdminRules) {
         runCatching {
             File(context.filesDir, "session-debug.txt").writeText(
                 buildString {
@@ -162,6 +230,10 @@ object XrayConfig {
                     appendLine("spx      = '${p.spx}'")
                     appendLine("pbk      = ${mask(p.pbk)}")
                     appendLine("uuid     = ${mask(p.uuid)}")
+                    appendLine(
+                        "rules    = v${rules.version}: proxy_domains=${rules.proxyDomains.size} proxy_ips=${rules.proxyIps.size} " +
+                            "direct_domains=${rules.directDomains.size} direct_ips=${rules.directIps.size}",
+                    )
                     appendLine("--- расхождения json/link ---")
                     if (diffs.isEmpty()) appendLine("нет") else diffs.forEach { appendLine(it) }
                 },

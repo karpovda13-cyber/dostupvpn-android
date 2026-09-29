@@ -215,6 +215,10 @@ class ApiClient(private val store: SecureStore, context: Context) {
         )
     }
 
+    /** Правила маршрутизации администратора. Публичный эндпоинт: токен не отправляем. */
+    fun rules(currentVersion: Int): JSONObject =
+        request("GET", "/v1/rules?version=$currentVersion", auth = false)
+
     fun heartbeat() {
         request("POST", "/v1/session/heartbeat")
     }

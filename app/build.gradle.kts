@@ -4,6 +4,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Постоянный ключ подписи приходит из CI (секреты GitHub, см. README → «Подпись»).
+// Без него сборка подписывается случайным debug-ключом, и обновить приложение поверх
+// предыдущей версии нельзя (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+val ciKeystore: String? = System.getenv("SIGNING_KEYSTORE_FILE")
+    ?.takeIf { it.isNotBlank() && file(it).exists() }
+
 android {
     namespace = "com.dostupvpn.app"
     compileSdk = 35
@@ -12,19 +18,34 @@ android {
         applicationId = "com.dostupvpn.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Должен только расти, иначе Android откажется ставить «более старую» версию поверх новой.
+        // Минуты с 1970 года: растёт монотонно и не зависит от счётчика запусков CI.
+        versionCode = (System.currentTimeMillis() / 60_000L).toInt()
+        versionName = "0.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
         // Ядро Xray ужимается в CI до arm64 — другие ABI не нужны.
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    signingConfigs {
+        if (ciKeystore != null) {
+            create("dostup") {
+                storeFile = file(ciKeystore)
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (ciKeystore != null) signingConfig = signingConfigs.getByName("dostup")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Подпись debug-ключом, чтобы release-APK можно было поставить без своего keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (ciKeystore != null) "dostup" else "debug")
         }
     }
     compileOptions {
