@@ -22,7 +22,7 @@ jobs:
 
       - name: Download libv2ray.aar (Xray-core) and slim it down
         # Готовый aar весит ~62 МБ: внутри 4 ABI и geo-базы (~28 МБ), которые нам не нужны.
-        # Оставляем только arm64-v8a; geoip/geosite не используются (в конфиге нет таких правил).
+        # Оставляем только arm64-v8a; полные geoip/geosite не нужны — в APK лежат свои урезанные базы (app/src/main/assets/geo).
         run: |
           mkdir -p app/libs
           curl -fL --retry 3 -o app/libs/libv2ray.aar \
@@ -35,8 +35,30 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Restore signing key
+        # Один и тот же ключ во всех сборках — иначе Android не даст обновить приложение.
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::Секрет SIGNING_KEYSTORE_BASE64 не задан: APK подпишется случайным debug-ключом и не сможет обновляться поверх прежней версии."
+          else
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dostup.keystore"
+            echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/dostup.keystore" >> "$GITHUB_ENV"
+          fi
+
       - name: Build debug APK
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Show signing certificate
+        # SHA-256 сертификата должен быть одинаковым во всех сборках.
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/*.apk | grep -E "certificate SHA-256|Signer #1 certificate DN"
 
       - uses: actions/upload-artifact@v4
         with:
