@@ -36,31 +36,43 @@ jobs:
           gradle-version: "8.9"
 
       - name: Restore signing key
-        # Один и тот же ключ во всех сборках — иначе Android не даст обновить приложение.
+        # Один и тот же ключ во всех сборках — иначе Android не даст обновить приложение поверх
+        # установленного, а у тестеров придётся каждый раз удалять его вручную.
         env:
           KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "::warning::Секрет SIGNING_KEYSTORE_BASE64 не задан: APK подпишется случайным debug-ключом и не сможет обновляться поверх прежней версии."
-          else
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dostup.keystore"
-            echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/dostup.keystore" >> "$GITHUB_ENV"
+            echo "::error::Не задан секрет SIGNING_KEYSTORE_BASE64. Бета-сборка должна подписываться постоянным ключом (см. README → «Подпись»)."
+            exit 1
           fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dostup.keystore"
+          echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/dostup.keystore" >> "$GITHUB_ENV"
 
-      - name: Build debug APK
+      - name: Build APKs (release + debug)
         env:
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: gradle :app:assembleRelease :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Show signing certificate
-        # SHA-256 сертификата должен быть одинаковым во всех сборках.
+      - name: Verify signature and name the files
+        # SHA-256 сертификата должен быть одинаковым во всех сборках — так видно, что ключ тот же.
         run: |
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/*.apk | grep -E "certificate SHA-256|Signer #1 certificate DN"
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/*.apk | grep -E "Verified|certificate SHA-256"
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk "dist/DostupVPN-beta-${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/debug/*.apk   "dist/DostupVPN-debug-${GITHUB_RUN_NUMBER}.apk"
+          ls -la dist
 
+      # Для тестеров: подписанная релизная сборка (не debuggable, меньше шума в журналах).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DostupVPN-beta-apk
+          path: dist/DostupVPN-beta-*.apk
+
+      # Для разработчика: отладочная сборка (работает adb run-as для чтения логов).
       - uses: actions/upload-artifact@v4
         with:
           name: DostupVPN-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: dist/DostupVPN-debug-*.apk
