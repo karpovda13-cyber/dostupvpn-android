@@ -3,13 +3,14 @@ package com.dostupvpn.app.vpn
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import com.dostupvpn.app.diag.AppError
+import com.dostupvpn.app.diag.Errors
+import com.dostupvpn.app.diag.EventLog
 import com.dostupvpn.app.net.ApiClient
 import com.dostupvpn.app.net.ApiException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.io.IOException
 
 /**
  * Starts/stops the foreground VPN service. The service itself owns the server heartbeat,
@@ -19,9 +20,10 @@ class VpnController(private val context: Context, private val api: ApiClient) {
 
     sealed interface State {
         data object Disconnected : State
-        data object Connecting : State
+        /** [stage] — что происходит сейчас («Запрос сессии…», «Запуск туннеля…»). */
+        data class Connecting(val stage: String) : State
         data class Connected(val connectedAt: Long) : State
-        data class Failed(val message: String) : State
+        data class Failed(val error: AppError) : State
     }
 
     private val sessionStore = VpnSessionStore(context)
@@ -35,23 +37,49 @@ class VpnController(private val context: Context, private val api: ApiClient) {
         else -> State.Disconnected
     }
 
-    suspend fun connect(scope: CoroutineScope, onState: (State) -> Unit) {
-        onState(State.Connecting)
+    fun lastSessionSec(): Long = sessionStore.lastSessionSec()
+
+    fun observe(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) = sessionStore.register(listener)
+    fun stopObserving(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) = sessionStore.unregister(listener)
+
+    /** Убирает показанную ошибку (пользователь закрыл карточку). */
+    fun dismissError() = sessionStore.clear()
+
+    suspend fun connect(onState: (State) -> Unit) {
+        fun stage(text: String) {
+            EventLog.add(context, text)
+            onState(State.Connecting(text))
+        }
+        fun failed(error: AppError) {
+            EventLog.add(context, "ОШИБКА ${error.code}: ${error.title}${if (error.detail.isBlank()) "" else " | ${error.detail}"}")
+            onState(State.Failed(error))
+        }
+
+        EventLog.add(context, "── подключение ──")
+        stage("Запрос сессии…")
         sessionStore.clear()
         try {
             val session = withContext(Dispatchers.IO) { api.sessionStart() }
+            EventLog.add(context, "Сессия создана (heartbeat ${session.heartbeatSec} с)")
+
             // Правила админа: сервер уже доступен (сессия создана). Ошибка не критична —
             // используем то, что закешировано с прошлого раза.
+            stage("Загрузка правил…")
             withContext(Dispatchers.IO) {
                 runCatching { AdminRulesStore.update(context, api.rules(AdminRulesStore.version(context))) }
             }
+            EventLog.add(context, "Правила маршрутизации: v${AdminRulesStore.version(context)}")
+
             val config = try {
                 withContext(Dispatchers.IO) { XrayConfig.build(context, session) }
             } catch (e: Exception) {
                 // Сервер уже создал временный конфиг — освобождаем, иначе он «зависнет» до таймаута.
                 withContext(Dispatchers.IO) { runCatching { api.sessionStop() } }
-                throw e
+                failed(Errors.config(e))
+                return
             }
+
+            stage("Запуск туннеля…")
             context.startService(
                 Intent(context, DostupVpnService::class.java)
                     .putExtra(DostupVpnService.EXTRA_CONFIG, config)
@@ -70,24 +98,18 @@ class VpnController(private val context: Context, private val api: ApiClient) {
                     else -> Unit
                 }
             }
-            onState(State.Failed("VPN не успел запуститься. Повторите подключение."))
+            failed(Errors.TIMEOUT)
         } catch (e: ApiException) {
-            onState(State.Failed(apiErrorMessage(e)))
-        } catch (e: IOException) {
-            onState(State.Failed("Ошибка подготовки VPN: ${e.message ?: "нет связи с сетью"}"))
+            failed(Errors.fromApi(e))
         } catch (e: Exception) {
-            onState(State.Failed("Ошибка подготовки VPN: ${e.message ?: "неизвестная ошибка"}"))
+            failed(Errors.from(e))
         }
     }
 
     fun disconnect(onState: (State) -> Unit) {
+        EventLog.add(context, "Отключено пользователем")
         context.startService(Intent(context, DostupVpnService::class.java).setAction(DostupVpnService.ACTION_STOP))
         sessionStore.clear()
         onState(State.Disconnected)
-    }
-
-    private fun apiErrorMessage(e: ApiException): String = when (e.status) {
-        402 -> "Подписка не активна. Продлите её в боте."
-        else -> e.message.ifBlank { "Ошибка сервера (${e.status})" }
     }
 }

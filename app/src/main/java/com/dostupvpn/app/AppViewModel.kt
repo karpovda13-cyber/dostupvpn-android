@@ -1,13 +1,19 @@
 package com.dostupvpn.app
 
 import android.app.Application
+import android.content.SharedPreferences
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.dostupvpn.app.data.SecureStore
+import com.dostupvpn.app.data.UiPrefs
+import com.dostupvpn.app.diag.AppError
+import com.dostupvpn.app.diag.Errors
+import com.dostupvpn.app.diag.Report
 import com.dostupvpn.app.net.ApiClient
 import com.dostupvpn.app.net.ApiException
 import com.dostupvpn.app.net.Me
+import com.dostupvpn.app.ui.ThemeMode
 import com.dostupvpn.app.vpn.VpnController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,31 +22,59 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.IOException
 
 sealed interface Screen {
     data object Loading : Screen
     data object Login : Screen
     data class Home(val me: Me) : Screen
-    data class Offline(val message: String) : Screen
+    data class Offline(val error: AppError) : Screen
 }
 
 data class UiState(
     val screen: Screen = Screen.Loading,
     val busy: Boolean = false,
-    val error: String? = null,
+    val error: AppError? = null,
     val vpn: VpnController.State = VpnController.State.Disconnected,
+    /** Длительность последнего подключения, сек (для серого таймера в отключённом состоянии). */
+    val lastSessionSec: Long = 0L,
     /** Причина прошлого аварийного завершения (если было) — показывается, пока не начнётся новое подключение. */
-    val crash: String? = null,
+    val crash: AppError? = null,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val store = SecureStore(app)
     private val api = ApiClient(store, app)
     private val vpnController = VpnController(app, api)
+    private val prefs = UiPrefs(app)
 
-    private val _ui = MutableStateFlow(UiState())
+    private val _ui = MutableStateFlow(UiState(lastSessionSec = vpnController.lastSessionSec()))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
+
+    private val _theme = MutableStateFlow(prefs.themeMode())
+    val theme: StateFlow<ThemeMode> = _theme.asStateFlow()
+
+    // Служба меняет состояние из другого компонента (ошибка, потеря сессии) — подхватываем сразу,
+    // а не только при следующем открытии приложения. Ссылку держим в поле: SharedPreferences хранит слушателя слабо.
+    private val sessionListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        if (_ui.value.vpn !is VpnController.State.Connecting) setVpn(vpnController.currentState())
+    }
+
+    init {
+        vpnController.observe(sessionListener)
+    }
+
+    override fun onCleared() {
+        vpnController.stopObserving(sessionListener)
+    }
+
+    private fun setVpn(state: VpnController.State) {
+        _ui.update { it.copy(vpn = state, lastSessionSec = vpnController.lastSessionSec()) }
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        prefs.setThemeMode(mode)
+        _theme.value = mode
+    }
 
     /** Вызывается при каждом открытии приложения: если после принудительного освобождения
      *  слота в боте сервер ответит 401 — произойдёт автоматический выход. */
@@ -52,7 +86,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             refresh()
         }
-        if (crash != null) _ui.update { it.copy(crash = "Прошлый запуск завершился аварийно:\n$crash") }
+        if (crash != null) _ui.update { it.copy(crash = Errors.crash(crash)) }
     }
 
     fun refresh() {
@@ -67,13 +101,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val me = withContext(Dispatchers.IO) { api.me() }
                 store.setEndpoints(me.endpoints)
-                _ui.update { it.copy(screen = Screen.Home(me), busy = false, error = null, vpn = vpnController.currentState()) }
+                _ui.update {
+                    it.copy(
+                        screen = Screen.Home(me), busy = false, error = null,
+                        vpn = vpnController.currentState(), lastSessionSec = vpnController.lastSessionSec(),
+                    )
+                }
             } catch (e: ApiException) {
                 onApiError(e)
-            } catch (e: IOException) {
-                showProblem(OFFLINE_MSG)
             } catch (e: Exception) {
-                showProblem("Неожиданный ответ сервера. Повторите позже.")
+                showProblem(Errors.from(e))
             }
         }
     }
@@ -87,17 +124,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 store.saveLogin(r.deviceToken, name)
                 store.setEndpoints(r.endpoints)
                 refresh()
-            } catch (e: ApiException) {
-                val msg = when (e.status) {
-                    404 -> "Токен недействителен или истёк. Выпустите новый в боте."
-                    429 -> "Слишком много попыток. Подождите минуту."
-                    else -> e.message.ifBlank { "Ошибка сервера (${e.status})" }
-                }
-                _ui.update { it.copy(busy = false, error = msg) }
-            } catch (e: IOException) {
-                _ui.update { it.copy(busy = false, error = OFFLINE_MSG) }
             } catch (e: Exception) {
-                _ui.update { it.copy(busy = false, error = "Неожиданный ответ сервера. Повторите позже.") }
+                _ui.update { it.copy(busy = false, error = Errors.from(e)) }
             }
         }
     }
@@ -107,18 +135,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleVpn(enable: Boolean) {
         if (!enable) {
-            vpnController.disconnect { state -> _ui.update { it.copy(vpn = state) } }
+            vpnController.disconnect(::setVpn)
             return
         }
-        _ui.update { it.copy(crash = null) }
-        viewModelScope.launch {
-            vpnController.connect(viewModelScope) { state -> _ui.update { it.copy(vpn = state) } }
+        _ui.update { it.copy(crash = null, error = null) }
+        viewModelScope.launch { vpnController.connect(::setVpn) }
+    }
+
+    /** Пользователь закрыл карточку с ошибкой. */
+    fun dismissError() {
+        vpnController.dismissError()
+        _ui.update {
+            it.copy(
+                error = null,
+                crash = null,
+                vpn = if (it.vpn is VpnController.State.Failed) VpnController.State.Disconnected else it.vpn,
+            )
         }
     }
 
     /** Выход освобождает слот на сервере. Без связи выйти нельзя — иначе слот остался бы занятым. */
     fun logout() {
-        vpnController.disconnect { state -> _ui.update { it.copy(vpn = state) } }
+        vpnController.disconnect(::setVpn)
         viewModelScope.launch {
             _ui.update { it.copy(busy = true, error = null) }
             try {
@@ -130,38 +168,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     store.clear()
                     _ui.value = UiState(Screen.Login)
                 } else {
-                    _ui.update { it.copy(busy = false, error = e.message.ifBlank { "Ошибка сервера (${e.status})" }) }
-                }
-            } catch (e: IOException) {
-                _ui.update {
-                    it.copy(busy = false, error = "Нет связи — выйти не удалось, слот не освобождён. Повторите позже.")
+                    _ui.update { it.copy(busy = false, error = Errors.fromApi(e)) }
                 }
             } catch (e: Exception) {
-                _ui.update { it.copy(busy = false, error = "Неожиданный ответ сервера. Повторите позже.") }
+                val base = Errors.from(e)
+                _ui.update {
+                    it.copy(
+                        busy = false,
+                        error = if (e is java.io.IOException) {
+                            base.copy(title = "Выйти не удалось — нет связи", hint = "Слот не освобождён. Повторите позже.")
+                        } else base,
+                    )
+                }
             }
         }
+    }
+
+    /** Текст отчёта для поддержки (без токенов и ключей). */
+    fun buildReport(): String {
+        val s = _ui.value
+        val vpnText = when (val v = s.vpn) {
+            VpnController.State.Disconnected -> "отключено"
+            is VpnController.State.Connecting -> "подключение (${v.stage})"
+            is VpnController.State.Connected -> "подключено"
+            is VpnController.State.Failed -> "ошибка ${v.error.code}"
+        }
+        val error = (s.vpn as? VpnController.State.Failed)?.error ?: s.error ?: s.crash
+        val subscription = (s.screen as? Screen.Home)?.me?.let {
+            if (it.active) "активна до ${it.expireDate ?: "—"}, осталось ${it.daysLeft} дн." else "не активна"
+        }
+        return Report.build(getApplication(), vpnText, error, subscription)
     }
 
     private fun onApiError(e: ApiException) {
         if (e.status == 401) {
             store.clear()
-            _ui.value = UiState(Screen.Login, error = "Сессия завершена. Выпустите новый токен в боте и войдите снова.")
+            _ui.value = UiState(Screen.Login, error = Errors.fromApi(e))
         } else {
-            showProblem(e.message.ifBlank { "Ошибка сервера (${e.status})" })
+            showProblem(Errors.fromApi(e))
         }
     }
 
     /** Если уже показан главный экран — ошибка выводится над кнопками; иначе — экран «нет связи». */
-    private fun showProblem(message: String) {
+    private fun showProblem(error: AppError) {
         _ui.update {
-            if (it.screen is Screen.Home) it.copy(busy = false, error = message)
-            else UiState(Screen.Offline(message))
+            if (it.screen is Screen.Home) it.copy(busy = false, error = error)
+            else UiState(Screen.Offline(error))
         }
     }
 
     private fun deviceName(): String = "${Build.MANUFACTURER} ${Build.MODEL}".trim().take(40)
-
-    private companion object {
-        const val OFFLINE_MSG = "Нет связи с сервером. Проверьте интернет и повторите."
-    }
 }

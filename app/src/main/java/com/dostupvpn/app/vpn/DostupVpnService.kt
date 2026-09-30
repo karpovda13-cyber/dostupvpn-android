@@ -14,6 +14,9 @@ import androidx.core.content.getSystemService
 import com.dostupvpn.app.MainActivity
 import com.dostupvpn.app.R
 import com.dostupvpn.app.data.SecureStore
+import com.dostupvpn.app.diag.AppError
+import com.dostupvpn.app.diag.Errors
+import com.dostupvpn.app.diag.EventLog
 import com.dostupvpn.app.net.ApiClient
 import com.dostupvpn.app.net.ApiException
 import kotlinx.coroutines.CoroutineScope
@@ -97,18 +100,23 @@ class DostupVpnService : VpnService() {
                 .apply { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) setMetered(false) }
                 .establish() ?: error("VPN not prepared or revoked")
             tun = pfd
+            EventLog.add(this, "TUN-интерфейс создан")
 
             val core = Libv2ray.newCoreController(coreCallback)
             core.startLoop(config, pfd.fd)
             if (!core.isRunning) error("ядро Xray не запустилось, см. xray.log")
             controller = core
+            EventLog.add(this, "Ядро Xray запущено")
 
-            sessionStore.markConnected()
+            val connectedAt = System.currentTimeMillis()
+            sessionStore.markConnected(connectedAt)
+            // Обновляем уведомление: живой таймер подключения и кнопка «Отключить».
+            getSystemService<NotificationManager>()?.notify(NOTIFICATION_ID, buildNotification(connectedAt))
             startHeartbeat()
         } catch (e: Exception) {
-            val message = vpnErrorMessage(e)
-            Log.e(TAG, "не удалось запустить VPN: $message", e)
-            fail(message)
+            val error = Errors.vpn(e)
+            Log.e(TAG, "не удалось запустить VPN: ${error.code}", e)
+            fail(error)
         }
     }
 
@@ -132,9 +140,10 @@ class DostupVpnService : VpnService() {
     }
 
     /** Аварийная остановка с сообщением для UI (сообщение не затирается). */
-    private fun fail(message: String) {
+    private fun fail(error: AppError) {
+        EventLog.add(this, "ОШИБКА ${error.code}: ${error.title}${if (error.detail.isBlank()) "" else " | ${error.detail}"}")
         teardown()
-        sessionStore.markFailed(message)
+        sessionStore.markFailed(error)
         serviceScope.launch { runCatching { api.sessionStop() } }
         stopSelf()
     }
@@ -149,11 +158,12 @@ class DostupVpnService : VpnService() {
                 } catch (e: ApiException) {
                     when (e.status) {
                         410 -> {           // сервер удалил конфиг — создаём новый и перезапускаем ядро
+                            EventLog.add(this@DostupVpnService, "Сервер удалил сессию (410) — создаём новую")
                             renewSession()
                             return@launch
                         }
                         401, 402 -> {
-                            fail(apiErrorMessage(e))
+                            fail(Errors.fromApi(e))
                             return@launch
                         }
                         else -> Log.w(TAG, "heartbeat error: ${e.message}")
@@ -173,7 +183,7 @@ class DostupVpnService : VpnService() {
             XrayConfig.build(this, session)
         } catch (e: Exception) {
             Log.e(TAG, "не удалось обновить VPN-сессию", e)
-            fail(vpnErrorMessage(e))
+            fail(Errors.from(e))
             return
         }
         startTunnel(config)   // сам создаст новый heartbeat
@@ -191,7 +201,7 @@ class DostupVpnService : VpnService() {
 
     override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
-    private fun buildNotification(): android.app.Notification {
+    private fun buildNotification(connectedAt: Long = 0L): android.app.Notification {
         val nm: NotificationManager? = getSystemService()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm?.createNotificationChannel(
@@ -202,31 +212,28 @@ class DostupVpnService : VpnService() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        // Кнопка в шторке: то же самое, что «отключить» в приложении (служба уже работает, поэтому
+        // запуск из уведомления разрешён системой даже в фоне).
+        val stop = PendingIntent.getService(
+            this, 1, Intent(this, DostupVpnService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
             .setContentTitle("DostupVPN")
-            .setContentText("VPN включён")
+            .setContentText(if (connectedAt > 0L) "VPN включён" else "Подключение…")
             .setSmallIcon(R.drawable.ic_vpn_notification)
             .setContentIntent(openApp)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
+            .addAction(0, "Отключить", stop)
+            .apply {
+                if (connectedAt > 0L) {
+                    setShowWhen(true)
+                    setWhen(connectedAt)
+                    setUsesChronometer(true)
+                }
+            }
             .build()
-    }
-
-    private fun vpnErrorMessage(e: Exception): String = when {
-        e.message?.contains("ACCESS_NETWORK_STATE", ignoreCase = true) == true ->
-            "VPN не запустился: отсутствует разрешение на состояние сети."
-        e.message?.contains("missing VPN permission", ignoreCase = true) == true ->
-            "Android не выдал разрешение на VPN. Повторите авторизацию VPN."
-        e.message?.contains("VPN not prepared or revoked", ignoreCase = true) == true ->
-            "Разрешение Android на VPN было отозвано."
-        else -> {
-            val detail = e.message?.trim()?.takeIf { it.isNotEmpty() }
-            if (detail != null) "VPN не запустился: $detail" else "VPN не удалось запустить. Повторите подключение."
-        }
-    }
-
-    private fun apiErrorMessage(e: ApiException): String = when (e.status) {
-        402 -> "Подписка не активна. Продлите её в боте."
-        401 -> "Сессия завершена. Войдите снова."
-        else -> e.message.ifBlank { "Ошибка сервера (${e.status})" }
     }
 }
