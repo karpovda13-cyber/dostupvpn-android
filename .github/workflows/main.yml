@@ -39,13 +39,32 @@ jobs:
         # Один и тот же ключ во всех сборках — иначе Android не даст обновить приложение поверх
         # установленного, а у тестеров придётся каждый раз удалять его вручную.
         env:
-          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::Не задан секрет SIGNING_KEYSTORE_BASE64. Бета-сборка должна подписываться постоянным ключом (см. README → «Подпись»)."
+          missing=""
+          for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Не заданы секреты:$missing. Они должны быть в Settings → Secrets and variables → Actions → Secrets → Repository secrets (секреты из раздела Environment secrets этому workflow недоступны)."
             exit 1
           fi
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dostup.keystore"
+
+          # Терпим переводы строк и пробелы, которые добавляют онлайн-конвертеры.
+          if ! echo "$SIGNING_KEYSTORE_BASE64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/dostup.keystore" 2>/dev/null; then
+            echo "::error::SIGNING_KEYSTORE_BASE64 не является корректным base64. Вставьте результат кодирования файла .keystore целиком, без правок."
+            exit 1
+          fi
+
+          # Проверяем, что хранилище открывается с этими паролем и алиасом, — ошибка будет понятной и сразу.
+          if ! keytool -list -keystore "$RUNNER_TEMP/dostup.keystore" -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::Хранилище ключей не открывается: проверьте SIGNING_STORE_PASSWORD (пароль), SIGNING_KEY_ALIAS (алиас) и что в SIGNING_KEYSTORE_BASE64 лежит именно ваш файл .keystore."
+            exit 1
+          fi
+          echo "Хранилище ключей в порядке, алиас найден."
           echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/dostup.keystore" >> "$GITHUB_ENV"
 
       - name: Build APKs (release + debug)
