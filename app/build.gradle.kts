@@ -21,7 +21,7 @@ android {
         // Должен только расти, иначе Android откажется ставить «более старую» версию поверх новой.
         // Минуты с 1970 года: растёт монотонно и не зависит от счётчика запусков CI.
         versionCode = (System.currentTimeMillis() / 60_000L).toInt()
-        versionName = "0.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+        versionName = "1.0.0-beta." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
         // Ядро Xray ужимается в CI до arm64 — другие ABI не нужны.
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -42,8 +42,10 @@ android {
             if (ciKeystore != null) signingConfig = signingConfigs.getByName("dostup")
         }
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // R8 выключен осознанно: выигрыш ~2–3 МБ не стоит риска падений, которые нельзя проверить
+            // без реального устройства. Включим после периода бета-тестирования.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName(if (ciKeystore != null) "dostup" else "debug")
         }

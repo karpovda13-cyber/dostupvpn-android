@@ -41,8 +41,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import com.dostupvpn.app.data.UiPrefs
 import com.dostupvpn.app.diag.AppError
 import com.dostupvpn.app.diag.Report
+import com.dostupvpn.app.diag.canReport
 import com.dostupvpn.app.net.Me
 import com.dostupvpn.app.vpn.VpnController
 import kotlinx.coroutines.delay
@@ -71,6 +75,7 @@ fun HomeScreen(
     me: Me,
     vpn: VpnController.State,
     lastSessionSec: Long,
+    failStreak: Int,
     busy: Boolean,
     error: AppError?,
     dark: Boolean,
@@ -87,6 +92,12 @@ fun HomeScreen(
     var showSettings by remember { mutableStateOf(false) }
     var showSubscription by remember { mutableStateOf(false) }
     var confirmLogout by remember { mutableStateOf(false) }
+
+    // Подсказка про работу в фоне: только во время подключения, один раз, закрывается навсегда.
+    val uiPrefs = remember { UiPrefs(context) }
+    var batteryHintDismissed by remember { mutableStateOf(uiPrefs.batteryHintDismissed()) }
+    var unrestricted by remember { mutableStateOf(Background.isUnrestricted(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { unrestricted = Background.isUnrestricted(context) }
 
     val sub = subscriptionUi(me)
     val mode = when (vpn) {
@@ -136,10 +147,9 @@ fun HomeScreen(
                 description = powerDescription,
                 onClick = { onToggleVpn(vpn !is VpnController.State.Connected) },
             )
-            Spacer(Modifier.height(4.dp))
-            Text("DostupVPN", color = lerp(p.text, p.accent, 0.35f), fontSize = 34.sp, fontWeight = FontWeight.Light)
-            Text("VPN", color = p.text, fontSize = 40.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(12.dp))
+            Text("DostupVPN", color = lerp(p.text, p.accent, 0.35f), fontSize = 36.sp, fontWeight = FontWeight.Light)
+            Spacer(Modifier.height(8.dp))
             StatusRow(mode, statusText)
             if (vpn is VpnController.State.Connecting) {
                 Spacer(Modifier.height(4.dp))
@@ -150,11 +160,22 @@ fun HomeScreen(
             when {
                 shownError != null -> ErrorCard(
                     error = shownError,
+                    showReport = shownError.canReport(failStreak),
                     onReport = { Report.share(context, buildReport()) },
+                    // «Повторить» — только для сбоя подключения (не для ошибки загрузки данных).
+                    onRetry = if (vpn is VpnController.State.Failed && me.active) ({ onToggleVpn(true) }) else null,
                     onDismiss = onDismissError,
                 )
                 vpn is VpnController.State.Connected -> TimerPill(rememberElapsedSec(vpn.connectedAt), active = true)
                 vpn is VpnController.State.Disconnected && lastSessionSec > 0L -> TimerPill(lastSessionSec, active = false)
+            }
+
+            if (vpn is VpnController.State.Connected && !unrestricted && !batteryHintDismissed) {
+                Spacer(Modifier.height(16.dp))
+                BatteryHint(
+                    onAllow = { Background.request(context) },
+                    onDismiss = { uiPrefs.dismissBatteryHint(); batteryHintDismissed = true },
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -194,6 +215,32 @@ fun HomeScreen(
             },
             dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Отмена", color = p.accent) } },
         )
+    }
+}
+
+/** Короткая подсказка: без неё Android может «усыплять» VPN, когда телефон долго заблокирован. */
+@Composable
+private fun BatteryHint(onAllow: () -> Unit, onDismiss: () -> Unit) {
+    val p = LocalPalette.current
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Чтобы соединение не обрывалось, пока телефон заблокирован, разрешите приложению " +
+                        "работать без ограничений батареи.",
+                    color = p.textDim, fontSize = 13.sp,
+                )
+                TextButton(onClick = onAllow) { Text("Разрешить", color = p.accent) }
+            }
+            Box(
+                Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .semantics { contentDescription = "Скрыть подсказку" }
+                    .clickable(role = Role.Button, onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) { CloseIcon(p.textDim, 14.dp) }
+        }
     }
 }
 
@@ -260,7 +307,7 @@ fun OfflineScreen(error: AppError, onRetry: () -> Unit, buildReport: () -> Strin
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            ErrorCard(error = error, onReport = { Report.share(context, buildReport()) }, onDismiss = {})
+            ErrorCard(error = error, showReport = false, onReport = {}, onRetry = null, onDismiss = {})
             OutlinePillButton(text = "Повторить", icon = { PowerIcon(p.accent, 22.dp) }, onClick = onRetry)
         }
     }

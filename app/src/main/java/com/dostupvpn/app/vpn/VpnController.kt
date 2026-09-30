@@ -31,13 +31,25 @@ class VpnController(private val context: Context, private val api: ApiClient) {
     /** null, если разрешение на VPN уже выдано системой. */
     fun permissionIntent(): Intent? = VpnService.prepare(context)
 
-    fun currentState(): State = when {
+    fun currentState(): State {
+        if (sessionStore.connectedAt() > 0L && !DostupVpnService.running) {
+            // Процесс убит (например, оболочкой телефона) — туннеля больше нет, показывать «Подключен» нельзя.
+            EventLog.add(context, "Служба VPN была остановлена системой — состояние сброшено")
+            sessionStore.clearStale()
+        }
+        return stateFromStore()
+    }
+
+    private fun stateFromStore(): State = when {
+        sessionStore.connectedAt() > 0L && sessionStore.isReconnecting() -> State.Connecting("Восстановление соединения…")
         sessionStore.connectedAt() > 0L -> State.Connected(sessionStore.connectedAt())
         sessionStore.error() != null -> State.Failed(sessionStore.error()!!)
         else -> State.Disconnected
     }
 
     fun lastSessionSec(): Long = sessionStore.lastSessionSec()
+
+    fun failStreak(): Int = sessionStore.failStreak()
 
     fun observe(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) = sessionStore.register(listener)
     fun stopObserving(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) = sessionStore.unregister(listener)
@@ -51,6 +63,7 @@ class VpnController(private val context: Context, private val api: ApiClient) {
             onState(State.Connecting(text))
         }
         fun failed(error: AppError) {
+            sessionStore.recordFailure()
             EventLog.add(context, "ОШИБКА ${error.code}: ${error.title}${if (error.detail.isBlank()) "" else " | ${error.detail}"}")
             onState(State.Failed(error))
         }

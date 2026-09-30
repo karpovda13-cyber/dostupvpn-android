@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import com.dostupvpn.app.ApiConfig
 import com.dostupvpn.app.diag.AppError
 import com.dostupvpn.app.diag.Report
+import com.dostupvpn.app.diag.canReport
 
 @Composable
 fun LoginScreen(
@@ -92,7 +93,14 @@ fun LoginScreen(
             )
             if (error != null) {
                 Spacer(Modifier.height(12.dp))
-                ErrorCard(error = error, onReport = { Report.share(context, buildReport()) }, onDismiss = onDismissError)
+                ErrorCard(
+                    error = error,
+                    // Ошибки входа исправляются самим пользователем; отчёт — только после сбоя приложения.
+                    showReport = error.canReport(0),
+                    onReport = { Report.share(context, buildReport()) },
+                    onRetry = null,
+                    onDismiss = onDismissError,
+                )
             }
             Spacer(Modifier.height(16.dp))
             Button(

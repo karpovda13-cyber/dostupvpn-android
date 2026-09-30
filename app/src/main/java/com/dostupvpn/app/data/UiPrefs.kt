@@ -10,6 +10,12 @@ class UiPrefs(context: Context) {
     fun themeMode(): ThemeMode =
         runCatching { ThemeMode.valueOf(prefs.getString("theme", null) ?: "AUTO") }.getOrDefault(ThemeMode.AUTO)
 
+    fun batteryHintDismissed(): Boolean = prefs.getBoolean("battery_hint_dismissed", false)
+
+    fun dismissBatteryHint() {
+        prefs.edit().putBoolean("battery_hint_dismissed", true).apply()
+    }
+
     fun setThemeMode(mode: ThemeMode) {
         prefs.edit().putString("theme", mode.name).apply()
     }

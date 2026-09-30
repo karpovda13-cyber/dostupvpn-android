@@ -268,7 +268,9 @@ fun OutlinePillButton(text: String, icon: @Composable () -> Unit, onClick: () ->
 @Composable
 fun ErrorCard(
     error: com.dostupvpn.app.diag.AppError,
+    showReport: Boolean,
     onReport: () -> Unit,
+    onRetry: (() -> Unit)?,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -287,7 +289,11 @@ fun ErrorCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CodeChip(error.code, p.danger)
                     Spacer(Modifier.width(4.dp))
-                    TextButton(onClick = onReport) { Text("Отправить отчёт", color = p.accent) }
+                    if (showReport) {
+                        TextButton(onClick = onReport) { Text("Отправить отчёт", color = p.accent) }
+                    } else if (onRetry != null) {
+                        TextButton(onClick = onRetry) { Text("Повторить", color = p.accent) }
+                    }
                 }
             }
             Box(

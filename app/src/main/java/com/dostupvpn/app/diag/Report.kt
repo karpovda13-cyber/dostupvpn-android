@@ -41,7 +41,7 @@ object Report {
             appendLine(EventLog.tail(context, 60).ifBlank { "(пусто)" })
             appendLine()
             appendLine("── Журнал ядра (последние строки) ──")
-            appendLine(tailOf("xray.log", 60))
+            appendLine(Redact.hosts(tailOf("xray.log", 60)))
         }
         return Redact.apply(text).take(40_000)
     }

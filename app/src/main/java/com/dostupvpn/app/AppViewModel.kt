@@ -37,6 +37,8 @@ data class UiState(
     val vpn: VpnController.State = VpnController.State.Disconnected,
     /** Длительность последнего подключения, сек (для серого таймера в отключённом состоянии). */
     val lastSessionSec: Long = 0L,
+    /** Сколько попыток подключения подряд закончились ошибкой: от этого зависит, предлагать ли отчёт. */
+    val failStreak: Int = 0,
     /** Причина прошлого аварийного завершения (если было) — показывается, пока не начнётся новое подключение. */
     val crash: AppError? = null,
 )
@@ -47,7 +49,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val vpnController = VpnController(app, api)
     private val prefs = UiPrefs(app)
 
-    private val _ui = MutableStateFlow(UiState(lastSessionSec = vpnController.lastSessionSec()))
+    private val _ui = MutableStateFlow(
+        UiState(lastSessionSec = vpnController.lastSessionSec(), failStreak = vpnController.failStreak()),
+    )
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     private val _theme = MutableStateFlow(prefs.themeMode())
@@ -55,8 +59,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // Служба меняет состояние из другого компонента (ошибка, потеря сессии) — подхватываем сразу,
     // а не только при следующем открытии приложения. Ссылку держим в поле: SharedPreferences хранит слушателя слабо.
+    // Пока идёт подключение по нажатию кнопки, состояние ведёт сам контроллер — не мешаем ему.
+    @Volatile
+    private var connectInProgress = false
+
     private val sessionListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
-        if (_ui.value.vpn !is VpnController.State.Connecting) setVpn(vpnController.currentState())
+        if (!connectInProgress) setVpn(vpnController.currentState())
     }
 
     init {
@@ -68,7 +76,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun setVpn(state: VpnController.State) {
-        _ui.update { it.copy(vpn = state, lastSessionSec = vpnController.lastSessionSec()) }
+        _ui.update {
+            it.copy(vpn = state, lastSessionSec = vpnController.lastSessionSec(), failStreak = vpnController.failStreak())
+        }
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -105,6 +115,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         screen = Screen.Home(me), busy = false, error = null,
                         vpn = vpnController.currentState(), lastSessionSec = vpnController.lastSessionSec(),
+                        failStreak = vpnController.failStreak(),
                     )
                 }
             } catch (e: ApiException) {
@@ -139,7 +150,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _ui.update { it.copy(crash = null, error = null) }
-        viewModelScope.launch { vpnController.connect(::setVpn) }
+        connectInProgress = true
+        viewModelScope.launch {
+            try {
+                vpnController.connect(::setVpn)
+            } finally {
+                connectInProgress = false
+            }
+        }
     }
 
     /** Пользователь закрыл карточку с ошибкой. */

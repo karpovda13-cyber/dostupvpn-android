@@ -112,6 +112,7 @@ private fun AppRoot(vm: AppViewModel, dark: Boolean, themeMode: ThemeMode) {
             me = s.me,
             vpn = ui.vpn,
             lastSessionSec = ui.lastSessionSec,
+            failStreak = ui.failStreak,
             busy = ui.busy,
             error = ui.error ?: ui.crash,
             dark = dark,

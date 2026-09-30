@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Кольцо с символом питания (как кнопка на главном экране). Всё внутри безопасной зоны 66x66 dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M29,54a25,25 0,1 1,50 0a25,25 0,1 1,-50 0"
+        android:strokeColor="#FF4C8DFF"
+        android:strokeWidth="5" />
+    <path
+        android:fillColor="#FF0B1630"
+        android:pathData="M35,54a19,19 0,1 1,38 0a19,19 0,1 1,-38 0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M61.07,45.57A11,11 0,1 1,46.93,45.57"
+        android:strokeColor="#FF7CC0FF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.8" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,40.8L54,52.9"
+        android:strokeColor="#FF7CC0FF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.8" />
+</vector>

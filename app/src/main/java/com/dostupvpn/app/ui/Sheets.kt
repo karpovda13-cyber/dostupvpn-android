@@ -118,10 +118,22 @@ fun SettingsSheet(
             InfoRow("Маршрутизация", "РФ напрямую, остальное через VPN")
             InfoRow("Правила сервиса", "версия ${AdminRulesStore.version(context)}")
 
+            Section("Работа в фоне")
+            val unrestricted = Background.isUnrestricted(context)
+            InfoRow("Ограничения батареи", if (unrestricted) "сняты" else "действуют")
+            if (!unrestricted) {
+                Text(
+                    "Из-за них Android может отключать VPN, когда телефон долго заблокирован (например, ночью).",
+                    color = p.textDim, fontSize = 13.sp,
+                )
+                TextButton(onClick = { Background.request(context) }) { Text("Разрешить работу в фоне", color = p.accent) }
+            }
+
             Section("Обратная связь")
             Text(
-                "Если что-то не работает, отправьте отчёт: в нём версия приложения, код ошибки и журнал " +
-                    "подключения. Токены и ключи в отчёт не попадают, но в журнале могут быть адреса сайтов.",
+                "Если что-то не работает, отправьте отчёт — так мы быстрее найдём причину. В нём только " +
+                    "технические сведения: версия приложения, код ошибки и журнал подключения. " +
+                    "Токены, пароли и адреса посещённых сайтов в отчёт не попадают.",
                 color = p.textDim, fontSize = 13.sp,
             )
             Spacer(Modifier.height(12.dp))
