@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.VpnService
@@ -120,7 +121,7 @@ class DostupVpnService : VpnService() {
         try {
             if (prepare(this) != null) error("missing VPN permission")
 
-            val pfd = Builder()
+            val builder = Builder()
                 .setSession("DostupVPN")
                 .setMtu(XrayConfig.TUN_MTU)
                 .addAddress("172.19.0.1", 30)
@@ -128,8 +129,9 @@ class DostupVpnService : VpnService() {
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .addDisallowedApplication(packageName)
-                .apply { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) setMetered(false) }
-                .establish() ?: error("VPN not prepared or revoked")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
+            excludeBypassApps(builder)
+            val pfd = builder.establish() ?: error("VPN not prepared or revoked")
             tun = pfd
             EventLog.add(this, "TUN-интерфейс создан")
 
@@ -150,6 +152,26 @@ class DostupVpnService : VpnService() {
             Log.e(TAG, "не удалось запустить VPN: ${error.code}", e)
             fail(error)
         }
+    }
+
+    /**
+     * Приложения из списка администратора (bypass_apps) работают мимо VPN. Не установленные на этом
+     * телефоне пропускаются. Имена пакетов в журнал не пишем — только количество.
+     */
+    private fun excludeBypassApps(builder: Builder) {
+        val apps = AdminRulesStore.load(this).bypassApps
+        if (apps.isEmpty()) return
+        var applied = 0
+        for (pkg in apps) {
+            if (pkg == packageName) continue
+            try {
+                builder.addDisallowedApplication(pkg)
+                applied++
+            } catch (_: PackageManager.NameNotFoundException) {
+                // приложения нет на этом телефоне (или оно не видно системе) — это нормально
+            }
+        }
+        EventLog.add(this, "Приложений вне VPN: $applied из ${apps.size} в списке")
     }
 
     /** Останавливает ядро и закрывает TUN. Состояние UI и сервер не трогает. */

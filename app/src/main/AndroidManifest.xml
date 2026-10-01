@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Нужна, чтобы исключать из VPN приложения из списка администратора: с Android 11 система скрывает
+         чужие пакеты, и без этого разрешения addDisallowedApplication не находит их. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <!-- Позволяет попросить «работать без ограничений батареи», чтобы VPN не обрывался при долгой блокировке. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 

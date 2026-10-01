@@ -117,6 +117,8 @@ fun SettingsSheet(
             InfoRow("Протокол", "VLESS + Reality")
             InfoRow("Маршрутизация", "РФ напрямую, остальное через VPN")
             InfoRow("Правила сервиса", "версия ${AdminRulesStore.version(context)}")
+            val outsideVpn = AdminRulesStore.load(context).bypassApps.size
+            if (outsideVpn > 0) InfoRow("Приложения вне VPN", "$outsideVpn (задаёт сервис)")
 
             Section("Работа в фоне")
             val unrestricted = Background.isUnrestricted(context)

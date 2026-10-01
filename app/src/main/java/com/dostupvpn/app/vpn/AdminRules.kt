@@ -12,7 +12,10 @@ import java.net.InetAddress
  * (файл /etc/vpn/app_rules.json на сервере, отдаётся через GET /v1/rules).
  *
  *  proxy_*  — всегда через VPN (перекрывают российские списки: например, заблокированный .ru-сайт);
- *  direct_* — всегда напрямую.
+ *  direct_* — всегда напрямую;
+ *  bypass_apps — приложения (имена пакетов), которые вообще не используют VPN: весь их трафик идёт мимо туннеля.
+ *    Так такие приложения не могут сравнить «какой IP видят российские сервисы» и «какой видят зарубежные»
+ *    и не видят адрес выхода VPN. Список ведёт администратор на сервере.
  *
  * Значения жёстко фильтруются: одна опечатка в чужом правиле не должна ломать запуск ядра
  * у всех пользователей (Xray не стартует на неизвестном geosite:/geoip: коде).
@@ -24,6 +27,7 @@ data class AdminRules(
     val proxyIps: List<String> = emptyList(),
     val directDomains: List<String> = emptyList(),
     val directIps: List<String> = emptyList(),
+    val bypassApps: List<String> = emptyList(),
 )
 
 object AdminRulesStore {
@@ -47,7 +51,8 @@ object AdminRulesStore {
                     .put("proxy_domains", JSONArray(rules.proxyDomains))
                     .put("proxy_ips", JSONArray(rules.proxyIps))
                     .put("direct_domains", JSONArray(rules.directDomains))
-                    .put("direct_ips", JSONArray(rules.directIps)),
+                    .put("direct_ips", JSONArray(rules.directIps))
+                    .put("bypass_apps", JSONArray(rules.bypassApps)),
             )
         File(context.filesDir, FILE).writeText(json.toString())
     }
@@ -62,6 +67,7 @@ object AdminRulesStore {
             proxyIps = strings(r, "proxy_ips").mapNotNull(::cleanIp).distinct().take(MAX_ITEMS),
             directDomains = strings(r, "direct_domains").mapNotNull(::cleanDomain).distinct().take(MAX_ITEMS),
             directIps = strings(r, "direct_ips").mapNotNull(::cleanIp).distinct().take(MAX_ITEMS),
+            bypassApps = strings(r, "bypass_apps").mapNotNull(::cleanPackage).distinct().take(MAX_ITEMS),
         )
     }
 
@@ -83,6 +89,14 @@ object AdminRulesStore {
         if (s.isEmpty() || s.length > 253) return null
         val ascii = try { IDN.toASCII(s) } catch (_: Exception) { return null }
         return if (LABELS.matches(ascii)) prefix + ascii else null
+    }
+
+    private val PACKAGE = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+$")
+
+    /** Имя пакета Android, например "com.example.app". Всё остальное отбрасывается. */
+    internal fun cleanPackage(raw: String): String? {
+        val s = raw.trim()
+        return if (s.length <= 255 && PACKAGE.matches(s)) s else null
     }
 
     /** IPv4/IPv6 адрес или CIDR. Префикс /0 запрещён (это «весь интернет»). */
