@@ -38,6 +38,13 @@ class VpnSessionStore(context: Context) {
         )
     }
 
+    /** Сколько приложений на этом телефоне реально исключено из VPN при последнем запуске туннеля. */
+    fun bypassApplied(): Int = prefs.getInt(KEY_BYPASS, 0)
+
+    fun setBypassApplied(count: Int) {
+        prefs.edit().putInt(KEY_BYPASS, count).apply()
+    }
+
     fun markConnected(at: Long = System.currentTimeMillis()) {
         prefs.edit()
             .putLong(KEY_CONNECTED_AT, at)
@@ -93,6 +100,7 @@ class VpnSessionStore(context: Context) {
         const val KEY_CONNECTED_AT = "connected_at"
         const val KEY_LAST_SEC = "last_session_sec"
         const val KEY_STREAK = "fail_streak"
+        const val KEY_BYPASS = "bypass_applied"
         const val KEY_RECONNECTING = "reconnecting"
         const val KEY_ERR_CODE = "err_code"
         const val KEY_ERR_TITLE = "err_title"

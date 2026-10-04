@@ -13,7 +13,9 @@ import java.net.InetAddress
  *
  *  proxy_*  — всегда через VPN (перекрывают российские списки: например, заблокированный .ru-сайт);
  *  direct_* — всегда напрямую;
- *  bypass_apps — приложения (имена пакетов), которые вообще не используют VPN: весь их трафик идёт мимо туннеля.
+ *  bypass_apps — приложения, которые вообще не используют VPN: весь их трафик идёт мимо туннеля.
+ *    Запись — точное имя пакета ("ru.sberbankmobile") либо маска по началу имени ("ru.*" — все
+ *    установленные пакеты, имя которых начинается с "ru.").
  *    Так такие приложения не могут сравнить «какой IP видят российские сервисы» и «какой видят зарубежные»
  *    и не видят адрес выхода VPN. Список ведёт администратор на сервере.
  *
@@ -67,7 +69,7 @@ object AdminRulesStore {
             proxyIps = strings(r, "proxy_ips").mapNotNull(::cleanIp).distinct().take(MAX_ITEMS),
             directDomains = strings(r, "direct_domains").mapNotNull(::cleanDomain).distinct().take(MAX_ITEMS),
             directIps = strings(r, "direct_ips").mapNotNull(::cleanIp).distinct().take(MAX_ITEMS),
-            bypassApps = strings(r, "bypass_apps").mapNotNull(::cleanPackage).distinct().take(MAX_ITEMS),
+            bypassApps = strings(r, "bypass_apps").mapNotNull(::cleanPackage).distinctBy { it.lowercase() }.take(MAX_ITEMS),
         )
     }
 
@@ -93,10 +95,21 @@ object AdminRulesStore {
 
     private val PACKAGE = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+$")
 
-    /** Имя пакета Android, например "com.example.app". Всё остальное отбрасывается. */
+    private val PACKAGE_BASE = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)*$")
+
+    /**
+     * Имя пакета ("com.example.app") или маска по началу имени ("ru.*"). Всё остальное отбрасывается.
+     * Маска обязана иметь основу не короче двух символов: так опечатка вроде "*" или "a.*" не исключит
+     * из VPN почти все приложения на телефоне.
+     */
     internal fun cleanPackage(raw: String): String? {
         val s = raw.trim()
-        return if (s.length <= 255 && PACKAGE.matches(s)) s else null
+        if (s.length > 255) return null
+        if (s.endsWith(".*")) {
+            val base = s.dropLast(2)
+            return if (base.length >= 2 && PACKAGE_BASE.matches(base)) s else null
+        }
+        return if (PACKAGE.matches(s)) s else null
     }
 
     /** IPv4/IPv6 адрес или CIDR. Префикс /0 запрещён (это «весь интернет»). */

@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import com.dostupvpn.app.BuildConfig
 import com.dostupvpn.app.diag.Report
 import com.dostupvpn.app.vpn.AdminRulesStore
+import com.dostupvpn.app.vpn.VpnSessionStore
 import com.dostupvpn.app.vpn.VpnController
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -117,8 +118,9 @@ fun SettingsSheet(
             InfoRow("Протокол", "VLESS + Reality")
             InfoRow("Маршрутизация", "РФ напрямую, остальное через VPN")
             InfoRow("Правила сервиса", "версия ${AdminRulesStore.version(context)}")
-            val outsideVpn = AdminRulesStore.load(context).bypassApps.size
-            if (outsideVpn > 0) InfoRow("Приложения вне VPN", "$outsideVpn (задаёт сервис)")
+            if (AdminRulesStore.load(context).bypassApps.isNotEmpty()) {
+                InfoRow("Приложения вне VPN", "${VpnSessionStore(context).bypassApplied()} (задаёт сервис)")
+            }
 
             Section("Работа в фоне")
             val unrestricted = Background.isUnrestricted(context)

@@ -155,15 +155,42 @@ class DostupVpnService : VpnService() {
     }
 
     /**
-     * Приложения из списка администратора (bypass_apps) работают мимо VPN. Не установленные на этом
-     * телефоне пропускаются. Имена пакетов в журнал не пишем — только количество.
+     * Приложения из списка администратора (bypass_apps) работают мимо VPN. Запись — точное имя пакета
+     * или маска "префикс.*": для масок перебираются установленные на телефоне пакеты. Не найденные
+     * пропускаются. Имена пакетов в журнал не пишем — только количество.
+     *
+     * Список применяется при запуске туннеля: приложение, установленное во время работы VPN,
+     * подхватится при следующем подключении.
      */
     private fun excludeBypassApps(builder: Builder) {
-        val apps = AdminRulesStore.load(this).bypassApps
-        if (apps.isEmpty()) return
+        val rules = AdminRulesStore.load(this).bypassApps
+        if (rules.isEmpty()) {
+            sessionStore.setBypassApplied(0)
+            return
+        }
+        val installed = installedPackageNames()
+        val byLower = installed.associateBy { it.lowercase() }   // имя в нижнем регистре -> настоящее имя на телефоне
+        val prefixes = ArrayList<String>()
+        val targets = LinkedHashSet<String>()
+        for (rule in rules) {
+            if (rule.endsWith(".*")) {
+                prefixes += rule.dropLast(1).lowercase()          // "ru.*" -> "ru."
+            } else if (installed.isEmpty()) {
+                targets += rule                                    // список приложений получить не удалось — пробуем напрямую
+            } else {
+                byLower[rule.lowercase()]?.let { targets += it }   // берём настоящее имя: регистр в списках бывает искажён
+            }
+        }
+        if (prefixes.isNotEmpty()) {
+            for (pkg in installed) {
+                val lower = pkg.lowercase()
+                if (prefixes.any { lower.startsWith(it) }) targets += pkg
+            }
+        }
+        targets.remove(packageName)
+
         var applied = 0
-        for (pkg in apps) {
-            if (pkg == packageName) continue
+        for (pkg in targets) {
             try {
                 builder.addDisallowedApplication(pkg)
                 applied++
@@ -171,7 +198,22 @@ class DostupVpnService : VpnService() {
                 // приложения нет на этом телефоне (или оно не видно системе) — это нормально
             }
         }
-        EventLog.add(this, "Приложений вне VPN: $applied из ${apps.size} в списке")
+        sessionStore.setBypassApplied(applied)
+        EventLog.add(this, "Приложений вне VPN: $applied (записей в списке: ${rules.size}, масок: ${prefixes.size})")
+    }
+
+    /** Имена всех установленных пакетов. Нужно разрешение QUERY_ALL_PACKAGES (с Android 11 без него список урезан). */
+    private fun installedPackageNames(): List<String> = try {
+        val apps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getInstalledApplications(0)
+        }
+        apps.map { it.packageName }
+    } catch (e: Exception) {
+        Log.w(TAG, "не удалось получить список приложений", e)
+        emptyList()
     }
 
     /** Останавливает ядро и закрывает TUN. Состояние UI и сервер не трогает. */

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "rules": {
     "proxy_domains": [
       "echo.msk.ru",
@@ -13,6 +13,8 @@
     ],
     "direct_ips": [],
     "bypass_apps": [
+      "ru.*",
+      "com.vkontakte.*",
       "com.example.messenger"
     ]
   }
