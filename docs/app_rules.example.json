@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "rules": {
     "proxy_domains": [
       "echo.msk.ru",
@@ -16,6 +16,8 @@
       "ru.*",
       "com.vkontakte.*",
       "com.example.messenger"
-    ]
+    ],
+    "split_dns": false,
+    "dns_ru_server": "77.88.8.8"
   }
 }

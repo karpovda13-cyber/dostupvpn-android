@@ -1,0 +1,24 @@
+{
+  "_comment": "Раздельный DNS для клиентов на ядре Xray (проверено на Xray 26.9.9). Вставьте блоки dns, dns-out и правила routing в свой конфиг. Если клиент ругается на неизвестный geosite-список — удалите его из domains. Имя входящего подключения (inboundTag) замените на своё.",
+  "dns": {
+    "servers": [
+      {
+        "address": "77.88.8.8",
+        "port": 53,
+        "domains": ["geosite:category-ru", "geosite:yandex", "geosite:vk", "geosite:mailru", "domain:ru", "domain:su", "domain:xn--p1ai"],
+        "skipFallback": true,
+        "timeoutMs": 2500
+      },
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "queryStrategy": "UseIPv4"
+  },
+  "outbounds_add": [
+    { "tag": "dns-out", "protocol": "dns" }
+  ],
+  "routing_rules_first": [
+    { "type": "field", "inboundTag": ["tun"], "port": "53", "outboundTag": "dns-out" },
+    { "type": "field", "ip": ["77.88.8.8"], "outboundTag": "direct" }
+  ]
+}

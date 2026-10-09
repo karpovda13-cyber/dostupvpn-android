@@ -22,6 +22,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dostupvpn.app.BuildConfig
+import com.dostupvpn.app.data.UiPrefs
 import com.dostupvpn.app.diag.Report
 import com.dostupvpn.app.vpn.AdminRulesStore
 import com.dostupvpn.app.vpn.VpnSessionStore
@@ -117,10 +122,17 @@ fun SettingsSheet(
             )
             InfoRow("Протокол", "VLESS + Reality")
             InfoRow("Маршрутизация", "РФ напрямую, остальное через VPN")
-            InfoRow("Правила сервиса", "версия ${AdminRulesStore.version(context)}")
+            val rulesNote = when (AdminRulesStore.status(context)) {
+                "empty" -> " — на сервере правил нет"
+                "error" -> " — обновить не удалось"
+                else -> ""
+            }
+            InfoRow("Правила сервиса", "версия ${AdminRulesStore.version(context)}$rulesNote")
             if (AdminRulesStore.load(context).bypassApps.isNotEmpty()) {
                 InfoRow("Приложения вне VPN", "${VpnSessionStore(context).bypassApplied()} (задаёт сервис)")
             }
+
+            SplitDnsSetting()
 
             Section("Работа в фоне")
             val unrestricted = Background.isUnrestricted(context)
@@ -197,6 +209,65 @@ private fun ThemeSegmented(mode: ThemeMode, onSet: (ThemeMode) -> Unit) {
                     label,
                     color = if (selected) (if (p.dark) Color(0xFF03122E) else Color.White) else p.text,
                     fontSize = 14.sp,
+                )
+            }
+        }
+    }
+}
+
+/** Раздельный DNS: «как задал сервис» / всегда вкл / всегда выкл. Применяется при следующем подключении. */
+@Composable
+private fun SplitDnsSetting() {
+    val p = LocalPalette.current
+    val context = LocalContext.current
+    val prefs = remember { UiPrefs(context) }
+    var mode by remember { mutableStateOf(prefs.splitDnsMode()) }
+    val serverOn = AdminRulesStore.load(context).splitDns
+
+    Spacer(Modifier.height(14.dp))
+    Text("Раздельный DNS (эксперимент)", color = p.text, fontSize = 15.sp)
+    Spacer(Modifier.height(8.dp))
+    SegmentedRow(listOf("По умолчанию", "Включён", "Выключен"), mode) {
+        mode = it
+        prefs.setSplitDnsMode(it)
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "Российские сайты спрашиваются у российского DNS напрямую, остальные — через VPN. " +
+            "Применяется при следующем подключении. «По умолчанию» — как задал сервис (сейчас: " +
+            (if (serverOn) "включён" else "выключен") + "). " +
+            "Если в Android включён «Частный DNS» с именем хоста, оставьте выключенным.",
+        color = p.textDim, fontSize = 12.sp,
+    )
+}
+
+@Composable
+private fun SegmentedRow(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+    val p = LocalPalette.current
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(p.accent.copy(alpha = 0.08f))
+            .border(1.dp, p.border, shape)
+            .padding(4.dp),
+    ) {
+        labels.forEachIndexed { index, label ->
+            val isSelected = index == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isSelected) p.accent else Color.Transparent)
+                    .clickable(role = Role.RadioButton) { onSelect(index) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    color = if (isSelected) (if (p.dark) Color(0xFF03122E) else Color.White) else p.text,
+                    fontSize = 13.sp,
                 )
             }
         }

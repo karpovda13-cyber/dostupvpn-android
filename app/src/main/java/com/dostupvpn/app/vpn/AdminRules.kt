@@ -13,6 +13,9 @@ import java.net.InetAddress
  *
  *  proxy_*  — всегда через VPN (перекрывают российские списки: например, заблокированный .ru-сайт);
  *  direct_* — всегда напрямую;
+ *  split_dns — true/false: раздельный DNS (российские имена сайтов спрашиваются у российского DNS напрямую,
+ *    остальные — через VPN). Пользователь может переопределить в Настройках; по умолчанию выключен.
+ *  dns_ru_server — IPv4-адрес российского DNS для раздельного DNS (по умолчанию 77.88.8.8, Яндекс).
  *  bypass_apps — приложения, которые вообще не используют VPN: весь их трафик идёт мимо туннеля.
  *    Запись — точное имя пакета ("ru.sberbankmobile") либо маска по началу имени ("ru.*" — все
  *    установленные пакеты, имя которых начинается с "ru.").
@@ -30,7 +33,11 @@ data class AdminRules(
     val directDomains: List<String> = emptyList(),
     val directIps: List<String> = emptyList(),
     val bypassApps: List<String> = emptyList(),
+    val splitDns: Boolean = false,
+    val ruDnsServer: String = DEFAULT_RU_DNS,
 )
+
+const val DEFAULT_RU_DNS = "77.88.8.8"
 
 object AdminRulesStore {
     private const val FILE = "rules.json"
@@ -54,12 +61,22 @@ object AdminRulesStore {
                     .put("proxy_ips", JSONArray(rules.proxyIps))
                     .put("direct_domains", JSONArray(rules.directDomains))
                     .put("direct_ips", JSONArray(rules.directIps))
-                    .put("bypass_apps", JSONArray(rules.bypassApps)),
+                    .put("bypass_apps", JSONArray(rules.bypassApps))
+                    .put("split_dns", rules.splitDns)
+                    .put("dns_ru_server", rules.ruDnsServer),
             )
         File(context.filesDir, FILE).writeText(json.toString())
     }
 
     fun version(context: Context): Int = load(context).version
+
+    /** Итог последней попытки загрузки: "ok", "empty" (сервер ответил «правил нет») или "error". */
+    fun status(context: Context): String =
+        context.getSharedPreferences("rules_meta", Context.MODE_PRIVATE).getString("status", "").orEmpty()
+
+    fun setStatus(context: Context, status: String) {
+        context.getSharedPreferences("rules_meta", Context.MODE_PRIVATE).edit().putString("status", status).apply()
+    }
 
     private fun parse(root: JSONObject): AdminRules {
         val r = root.optJSONObject("rules") ?: JSONObject()
@@ -70,6 +87,10 @@ object AdminRulesStore {
             directDomains = strings(r, "direct_domains").mapNotNull(::cleanDomain).distinct().take(MAX_ITEMS),
             directIps = strings(r, "direct_ips").mapNotNull(::cleanIp).distinct().take(MAX_ITEMS),
             bypassApps = strings(r, "bypass_apps").mapNotNull(::cleanPackage).distinctBy { it.lowercase() }.take(MAX_ITEMS),
+            splitDns = r.optBoolean("split_dns", false),
+            ruDnsServer = cleanIp(r.optString("dns_ru_server", ""))
+                ?.takeIf { '/' !in it && ':' !in it }      // только одиночный IPv4-адрес
+                ?: DEFAULT_RU_DNS,
         )
     }
 

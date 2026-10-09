@@ -2,6 +2,8 @@ package com.dostupvpn.app.vpn
 
 import android.content.Context
 import com.dostupvpn.app.BuildConfig
+import com.dostupvpn.app.data.UiPrefs
+import com.dostupvpn.app.diag.EventLog
 import com.dostupvpn.app.net.SessionInfo
 import org.json.JSONArray
 import org.json.JSONObject
@@ -73,7 +75,13 @@ object XrayConfig {
         val (params, diffs) = resolve(session)
         GeoAssets.ensure(context)
         val rules = AdminRulesStore.load(context)
-        writeDebug(context, params, diffs, rules)
+        val splitDns = when (UiPrefs(context).splitDnsMode()) {
+            1 -> true
+            2 -> false
+            else -> rules.splitDns
+        }
+        writeDebug(context, params, diffs, rules, splitDns)
+        EventLog.add(context, "Раздельный DNS: ${if (splitDns) "включён (российский DNS ${rules.ruDnsServer})" else "выключен"}")
 
         val log = logFile(context).also { runCatching { it.delete() } }
 
@@ -139,10 +147,37 @@ object XrayConfig {
                 JSONArray()
                     .put(proxy)
                     .put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
-                    .put(JSONObject().put("tag", "block").put("protocol", "blackhole")),
+                    .put(JSONObject().put("tag", "block").put("protocol", "blackhole"))
+                    .apply { if (splitDns) put(JSONObject().put("tag", "dns-out").put("protocol", "dns")) },
             )
-            .put("routing", routing(rules))
+            .put("routing", routing(rules, splitDns))
+        if (splitDns) root.put("dns", dnsConfig(rules))
         return root.toString()
+    }
+
+    /**
+     * Раздельный DNS: российские имена — у российского DNS (напрямую), остальные — у 1.1.1.1/8.8.8.8 (через VPN).
+     * Список российских доменов тот же, что в маршрутизации, поэтому адрес и соединение идут одним путём.
+     * queryStrategy UseIPv4: у туннеля нет IPv6, запросы AAAA не нужны (приложение сразу получает пустой ответ).
+     */
+    private fun dnsConfig(rules: AdminRules): JSONObject {
+        val servers = JSONArray()
+        // Правила администратора «через VPN» перекрывают российские списки и здесь.
+        if (rules.proxyDomains.isNotEmpty()) {
+            servers.put(
+                JSONObject().put("address", "1.1.1.1").put("port", 53)
+                    .put("domains", JSONArray(rules.proxyDomains)).put("skipFallback", true),
+            )
+        }
+        // skipFallback: этот сервер спрашивается только для своих доменов. Если он недоступен, Xray сам
+        // переключится на 1.1.1.1; timeoutMs ограничивает задержку в таком случае.
+        servers.put(
+            JSONObject().put("address", rules.ruDnsServer).put("port", 53)
+                .put("domains", JSONArray(RU_DOMAINS + rules.directDomains))
+                .put("skipFallback", true).put("timeoutMs", 2500),
+        )
+        servers.put("1.1.1.1").put("8.8.8.8")
+        return JSONObject().put("servers", servers).put("queryStrategy", "UseIPv4")
     }
 
     /**
@@ -153,14 +188,25 @@ object XrayConfig {
      *  4) российские домены и IP — напрямую;
      *  всё остальное — в VPN (первый outbound, "proxy").
      */
-    private fun routing(rules: AdminRules): JSONObject {
+    private fun routing(rules: AdminRules, splitDns: Boolean): JSONObject {
         fun rule(key: String, values: List<String>, outbound: String): JSONObject? =
             if (values.isEmpty()) null else JSONObject()
                 .put("type", "field")
                 .put(key, JSONArray(values))
                 .put("outboundTag", outbound)
 
-        val list = listOfNotNull(
+        val dnsRules: List<JSONObject> = if (!splitDns) emptyList() else listOf(
+            // DNS-запросы приложений (порт 53 из туннеля) отвечает встроенный DNS Xray — с делением по доменам.
+            // Только из туннеля (inboundTag): запросы самого DNS-модуля к серверам этим правилом не перехватываются.
+            JSONObject().put("type", "field").put("inboundTag", JSONArray().put("tun")).put("port", "53").put("outboundTag", "dns-out"),
+            // Android в режиме «Частный DNS: автоматически» шлёт запросы по DoT (порт 853) и обошёл бы перехват.
+            // Закрываем DoT к DNS-адресам туннеля — система откатывается на обычный DNS (порт 53).
+            JSONObject().put("type", "field").put("inboundTag", JSONArray().put("tun")).put("network", "tcp")
+                .put("ip", JSONArray().put("1.1.1.1").put("8.8.8.8")).put("port", "853").put("outboundTag", "block"),
+            // Российский DNS — всегда напрямую, независимо от того, входит ли его адрес в базу geoip:ru.
+            JSONObject().put("type", "field").put("ip", JSONArray().put(rules.ruDnsServer)).put("outboundTag", "direct"),
+        )
+        val list = dnsRules + listOfNotNull(
             rule("domain", rules.proxyDomains, "proxy"),
             rule("ip", rules.proxyIps, "proxy"),
             rule("domain", rules.directDomains, "direct"),
@@ -218,7 +264,7 @@ object XrayConfig {
     private fun mask(v: String) = if (v.length <= 8) v else v.take(8) + "…(len=${v.length})"
 
     /** Параметры без секретов целиком — для сверки с рабочей ссылкой. */
-    private fun writeDebug(context: Context, p: Params, diffs: List<String>, rules: AdminRules) {
+    private fun writeDebug(context: Context, p: Params, diffs: List<String>, rules: AdminRules, splitDns: Boolean) {
         runCatching {
             File(context.filesDir, "session-debug.txt").writeText(
                 buildString {
@@ -234,6 +280,7 @@ object XrayConfig {
                         "rules    = v${rules.version}: proxy_domains=${rules.proxyDomains.size} proxy_ips=${rules.proxyIps.size} " +
                             "direct_domains=${rules.directDomains.size} direct_ips=${rules.directIps.size}",
                     )
+                    appendLine("dns      = ${if (splitDns) "раздельный, российский ${rules.ruDnsServer}" else "обычный (через VPN)"}")
                     appendLine("--- расхождения json/link ---")
                     if (diffs.isEmpty()) appendLine("нет") else diffs.forEach { appendLine(it) }
                 },

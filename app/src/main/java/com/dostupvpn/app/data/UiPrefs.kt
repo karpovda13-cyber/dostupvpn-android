@@ -10,6 +10,13 @@ class UiPrefs(context: Context) {
     fun themeMode(): ThemeMode =
         runCatching { ThemeMode.valueOf(prefs.getString("theme", null) ?: "AUTO") }.getOrDefault(ThemeMode.AUTO)
 
+    /** Раздельный DNS: 0 — как задал сервис, 1 — всегда включён, 2 — всегда выключен. */
+    fun splitDnsMode(): Int = prefs.getInt("split_dns_mode", 0).coerceIn(0, 2)
+
+    fun setSplitDnsMode(mode: Int) {
+        prefs.edit().putInt("split_dns_mode", mode.coerceIn(0, 2)).apply()
+    }
+
     fun batteryHintDismissed(): Boolean = prefs.getBoolean("battery_hint_dismissed", false)
 
     fun dismissBatteryHint() {

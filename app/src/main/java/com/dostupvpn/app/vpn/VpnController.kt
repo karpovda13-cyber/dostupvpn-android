@@ -79,9 +79,26 @@ class VpnController(private val context: Context, private val api: ApiClient) {
             // используем то, что закешировано с прошлого раза.
             stage("Загрузка правил…")
             withContext(Dispatchers.IO) {
-                runCatching { AdminRulesStore.update(context, api.rules(AdminRulesStore.version(context))) }
+                try {
+                    val response = api.rules(AdminRulesStore.version(context))
+                    AdminRulesStore.update(context, response)
+                    val serverVersion = response.optInt("version", 0)
+                    if (serverVersion == 0) {
+                        AdminRulesStore.setStatus(context, "empty")
+                        EventLog.add(context, "Правила: на сервере нет правил или файл app_rules.json некорректен (ответ v0)")
+                    } else {
+                        AdminRulesStore.setStatus(context, "ok")
+                        EventLog.add(
+                            context,
+                            "Правила: сервер v$serverVersion, " + if (response.optBoolean("changed", false)) "обновлены" else "без изменений",
+                        )
+                    }
+                } catch (e: Exception) {
+                    AdminRulesStore.setStatus(context, "error")
+                    EventLog.add(context, "Правила: не удалось загрузить (${e.javaClass.simpleName}: ${e.message.orEmpty().take(80)})")
+                }
             }
-            EventLog.add(context, "Правила маршрутизации: v${AdminRulesStore.version(context)}")
+            EventLog.add(context, "Применяются правила v${AdminRulesStore.version(context)}")
 
             val config = try {
                 withContext(Dispatchers.IO) { XrayConfig.build(context, session) }
