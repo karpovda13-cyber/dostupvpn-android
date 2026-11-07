@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -12,8 +15,11 @@ import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import com.dostupvpn.app.MainActivity
 import com.dostupvpn.app.R
@@ -64,6 +70,9 @@ class DostupVpnService : VpnService() {
 
         /** После неудачного heartbeat повторяем быстрее обычного — сеть могла просто ещё не проснуться. */
         private const val HEARTBEAT_RETRY_MS = 15_000L
+
+        /** Несколько событий пробуждения подряд (экран, разблокировка, сеть) дают одну проверку, а не три. */
+        private const val MIN_WAKE_GAP_MS = 15_000L
         private const val RENEW_BACKOFF_STEP_MS = 5_000L
         private const val RENEW_BACKOFF_MAX_MS = 60_000L
         private const val MAX_CORE_LOG_BYTES = 1_000_000L
@@ -75,6 +84,7 @@ class DostupVpnService : VpnService() {
     private var heartbeatSec = 180
     private var sessionStartedAt = 0L
     private var netCallback: ConnectivityManager.NetworkCallback? = null
+    private var wakeReceiver: BroadcastReceiver? = null
 
     /** Сигнал «проснуться и проверить связь сейчас» (например, вернулась сеть). */
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -146,6 +156,7 @@ class DostupVpnService : VpnService() {
             sessionStore.markConnected(at)
             updateNotification(at, reconnecting = false)
             registerNetworkCallback()
+            registerWakeReceiver()
             startHeartbeat()
         } catch (e: Exception) {
             val error = Errors.vpn(e)
@@ -222,6 +233,7 @@ class DostupVpnService : VpnService() {
         heartbeatJob?.cancel()
         heartbeatJob = null
         unregisterNetworkCallback()
+        unregisterWakeReceiver()
         controller?.let { runCatching { it.stopLoop() } }
         controller = null
         // Android-версия TUN в Xray дескриптор не закрывает — владелец только мы.
@@ -249,9 +261,18 @@ class DostupVpnService : VpnService() {
         heartbeatJob?.cancel()
         heartbeatJob = serviceScope.launch {
             var waitMs = heartbeatSec * 1000L
+            var lastAttempt = 0L   // SystemClock.elapsedRealtime(): идёт и во время сна, в отличие от таймеров корутин
             while (isActive) {
-                // Ждём либо таймер, либо сигнал «сеть вернулась».
-                withTimeoutOrNull(waitMs) { wake.receive() }
+                // Ждём либо таймер, либо сигнал пробуждения (экран, разблокировка, выход из Doze, сеть).
+                // Таймер корутин замирает, пока телефон спит, поэтому без сигналов проверка после сна
+                // откладывалась бы на оставшуюся часть интервала.
+                val woken = withTimeoutOrNull(waitMs) { wake.receive(); true } ?: false
+                val now = SystemClock.elapsedRealtime()
+                if (woken && lastAttempt != 0L && now - lastAttempt < MIN_WAKE_GAP_MS) continue
+                if (woken && lastAttempt != 0L && now - lastAttempt > 60_000L) {
+                    EventLog.add(this@DostupVpnService, "Пробуждение: проверяю сессию (прошло ${(now - lastAttempt) / 1000} с)")
+                }
+                lastAttempt = now
                 trimCoreLog()
                 try {
                     api.heartbeat()
@@ -336,6 +357,38 @@ class DostupVpnService : VpnService() {
         val cb = netCallback ?: return
         netCallback = null
         runCatching { getSystemService<ConnectivityManager>()?.unregisterNetworkCallback(cb) }
+    }
+
+    /**
+     * Включение экрана, разблокировка и выход из режима Doze — моменты, когда пользователь ждёт связь.
+     * В эти моменты сразу проверяем сессию, не дожидаясь таймера.
+     */
+    private fun registerWakeReceiver() {
+        unregisterWakeReceiver()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                // Вход в Doze — не повод просыпаться; выход из него — повод.
+                if (intent?.action == PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED &&
+                    this@DostupVpnService.getSystemService<PowerManager>()?.isDeviceIdleMode == true
+                ) return
+                wake.trySend(Unit)
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+        }
+        runCatching {
+            ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            wakeReceiver = receiver
+        }
+    }
+
+    private fun unregisterWakeReceiver() {
+        val receiver = wakeReceiver ?: return
+        wakeReceiver = null
+        runCatching { unregisterReceiver(receiver) }
     }
 
     /** Журнал ядра при многодневной работе не должен расти бесконечно. */

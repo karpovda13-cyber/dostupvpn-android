@@ -9,6 +9,7 @@ import com.dostupvpn.app.data.SecureStore
 import com.dostupvpn.app.data.UiPrefs
 import com.dostupvpn.app.diag.AppError
 import com.dostupvpn.app.diag.Errors
+import com.dostupvpn.app.diag.OtherVpn
 import com.dostupvpn.app.diag.Report
 import com.dostupvpn.app.net.ApiClient
 import com.dostupvpn.app.net.ApiException
@@ -121,7 +122,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: ApiException) {
                 onApiError(e)
             } catch (e: Exception) {
-                showProblem(Errors.from(e))
+                showProblem(mapError(e))
             }
         }
     }
@@ -136,7 +137,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 store.setEndpoints(r.endpoints)
                 refresh()
             } catch (e: Exception) {
-                _ui.update { it.copy(busy = false, error = Errors.from(e)) }
+                _ui.update { it.copy(busy = false, error = mapError(e)) }
             }
         }
     }
@@ -189,11 +190,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     _ui.update { it.copy(busy = false, error = Errors.fromApi(e)) }
                 }
             } catch (e: Exception) {
-                val base = Errors.from(e)
+                val base = mapError(e)
                 _ui.update {
                     it.copy(
                         busy = false,
-                        error = if (e is java.io.IOException) {
+                        error = if (e is java.io.IOException && base.code == "E-NET") {
                             base.copy(title = "Выйти не удалось — нет связи", hint = "Слот не освобождён. Повторите позже.")
                         } else base,
                     )
@@ -217,6 +218,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         return Report.build(getApplication(), vpnText, error, subscription)
     }
+
+    /** Сетевая ошибка при включённом чужом VPN получает понятное объяснение (E-OTHERVPN). */
+    private fun mapError(e: Throwable): AppError = OtherVpn.refine(getApplication(), Errors.from(e))
 
     private fun onApiError(e: ApiException) {
         if (e.status == 401) {

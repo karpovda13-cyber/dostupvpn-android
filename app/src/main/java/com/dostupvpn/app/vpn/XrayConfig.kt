@@ -117,7 +117,12 @@ object XrayConfig {
                 JSONObject()
                     .put("network", "tcp")
                     .put("security", "reality")
-                    .put("realitySettings", reality),
+                    .put("realitySettings", reality)
+                    .apply {
+                        if (rules.tcpUserTimeoutMs > 0) {
+                            put("sockopt", JSONObject().put("tcpUserTimeout", rules.tcpUserTimeoutMs))
+                        }
+                    },
             )
 
         val sniffing = JSONObject()
@@ -280,6 +285,7 @@ object XrayConfig {
                         "rules    = v${rules.version}: proxy_domains=${rules.proxyDomains.size} proxy_ips=${rules.proxyIps.size} " +
                             "direct_domains=${rules.directDomains.size} direct_ips=${rules.directIps.size}",
                     )
+                    appendLine("tcp_user_timeout = ${if (rules.tcpUserTimeoutMs > 0) "${rules.tcpUserTimeoutMs} мс" else "выкл"}")
                     appendLine("dns      = ${if (splitDns) "раздельный, российский ${rules.ruDnsServer}" else "обычный (через VPN)"}")
                     appendLine("--- расхождения json/link ---")
                     if (diffs.isEmpty()) appendLine("нет") else diffs.forEach { appendLine(it) }

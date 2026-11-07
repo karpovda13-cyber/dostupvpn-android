@@ -16,6 +16,9 @@ import java.net.InetAddress
  *  split_dns — true/false: раздельный DNS (российские имена сайтов спрашиваются у российского DNS напрямую,
  *    остальные — через VPN). Пользователь может переопределить в Настройках; по умолчанию выключен.
  *  dns_ru_server — IPv4-адрес российского DNS для раздельного DNS (по умолчанию 77.88.8.8, Яндекс).
+ *  tcp_user_timeout_ms — 0 (выключено) или 5000..120000: через сколько мс без подтверждения от сервера ядро
+ *    обрывает соединение до VPN-сервера. Помогает после сна телефона: «мёртвые» соединения (NAT забыл их, пока
+ *    телефон спал) обнаруживаются за секунды, а не минуты, и приложения быстрее переподключаются.
  *  bypass_apps — приложения, которые вообще не используют VPN: весь их трафик идёт мимо туннеля.
  *    Запись — точное имя пакета ("ru.sberbankmobile") либо маска по началу имени ("ru.*" — все
  *    установленные пакеты, имя которых начинается с "ru.").
@@ -35,6 +38,7 @@ data class AdminRules(
     val bypassApps: List<String> = emptyList(),
     val splitDns: Boolean = false,
     val ruDnsServer: String = DEFAULT_RU_DNS,
+    val tcpUserTimeoutMs: Int = 0,
 )
 
 const val DEFAULT_RU_DNS = "77.88.8.8"
@@ -63,7 +67,8 @@ object AdminRulesStore {
                     .put("direct_ips", JSONArray(rules.directIps))
                     .put("bypass_apps", JSONArray(rules.bypassApps))
                     .put("split_dns", rules.splitDns)
-                    .put("dns_ru_server", rules.ruDnsServer),
+                    .put("dns_ru_server", rules.ruDnsServer)
+                    .put("tcp_user_timeout_ms", rules.tcpUserTimeoutMs),
             )
         File(context.filesDir, FILE).writeText(json.toString())
     }
@@ -91,6 +96,8 @@ object AdminRulesStore {
             ruDnsServer = cleanIp(r.optString("dns_ru_server", ""))
                 ?.takeIf { '/' !in it && ':' !in it }      // только одиночный IPv4-адрес
                 ?: DEFAULT_RU_DNS,
+            // 0 — выключено; всё остальное ограничиваем разумным диапазоном (слишком малое значение рвало бы живые соединения)
+            tcpUserTimeoutMs = r.optInt("tcp_user_timeout_ms", 0).let { if (it <= 0) 0 else it.coerceIn(5_000, 120_000) },
         )
     }
 

@@ -6,6 +6,7 @@ import android.net.VpnService
 import com.dostupvpn.app.diag.AppError
 import com.dostupvpn.app.diag.Errors
 import com.dostupvpn.app.diag.EventLog
+import com.dostupvpn.app.diag.OtherVpn
 import com.dostupvpn.app.net.ApiClient
 import com.dostupvpn.app.net.ApiException
 import kotlinx.coroutines.Dispatchers
@@ -132,7 +133,7 @@ class VpnController(private val context: Context, private val api: ApiClient) {
         } catch (e: ApiException) {
             failed(Errors.fromApi(e))
         } catch (e: Exception) {
-            failed(Errors.from(e))
+            failed(OtherVpn.refine(context, Errors.from(e)))
         }
     }
 

@@ -10,7 +10,16 @@ package com.dostupvpn.app
  */
 object ApiConfig {
     /** Адрес API по умолчанию. Формат: https://хост:порт (без слэша в конце). */
-    const val DEFAULT_API_URL = "https://176.98.181.30:8443"
+    const val DEFAULT_API_URL = "https://185.173.145.113:8443"
+
+    /**
+     * Адреса, которые пробуются после тех, что прислал сервер, и по порядку: новый сервер, затем прежний
+     * (на время переезда). Прежний адрес можно убрать после того, как старый сервер будет выключен.
+     */
+    val DEFAULT_API_URLS: List<String> = listOf(
+        DEFAULT_API_URL,
+        "https://176.98.181.30:8443",
+    )
 
     /** "pinned" — сверка отпечатка ключа (самоподписанный сертификат); "system" — обычная проверка. */
     const val DEFAULT_TLS_MODE = "pinned"

@@ -6,6 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import com.dostupvpn.app.ApiConfig
 import com.dostupvpn.app.data.SecureStore
+import com.dostupvpn.app.diag.OtherVpn
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -28,6 +29,7 @@ private fun JSONObject.strOrNull(name: String): String? = if (isNull(name)) null
  */
 class ApiClient(private val store: SecureStore, context: Context) {
 
+    private val appContext = context.applicationContext
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
 
     private val plain: OkHttpClient = buildClient(null, pinnedTls = false)
@@ -89,7 +91,7 @@ class ApiClient(private val store: SecureStore, context: Context) {
     private var preferredUrl: String? = null
 
     private fun endpoints(): List<Endpoint> {
-        val all = (store.endpoints() + Endpoint(ApiConfig.DEFAULT_API_URL, ApiConfig.DEFAULT_TLS_MODE))
+        val all = (store.endpoints() + ApiConfig.DEFAULT_API_URLS.map { Endpoint(it, ApiConfig.DEFAULT_TLS_MODE) })
             .distinctBy { it.url }
         val preferred = preferredUrl ?: return all
         return all.sortedBy { if (it.url == preferred) 0 else 1 }
@@ -113,7 +115,9 @@ class ApiClient(private val store: SecureStore, context: Context) {
             }
             // Do this for every request because the physical network can change while
             // the VPN remains enabled (Wi-Fi <-> cellular).
-            val network = physicalNetwork()
+            // Исключение — чужой VPN (например, v2rayTun): Android по умолчанию не разрешает обходить его, привязка
+            // к физической сети обрывает запрос сразу. Тогда идём обычным путём — через него.
+            val network = if (OtherVpn.isActive(appContext)) null else physicalNetwork()
             val client = if (network != null) {
                 buildClient(network, pinnedTls = ep.tls != "system")
             } else if (ep.tls == "system") {

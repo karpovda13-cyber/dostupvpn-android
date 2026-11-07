@@ -89,7 +89,7 @@ object Errors {
  */
 fun AppError.canReport(failStreak: Int): Boolean = when (code) {
     "E-CRASH" -> true
-    "E-401", "E-402", "E-404", "E-429", "E-VPN-PERM", "E-VPN-REVOKED" -> false
+    "E-401", "E-402", "E-404", "E-429", "E-VPN-PERM", "E-VPN-REVOKED", "E-OTHERVPN" -> false
     else -> failStreak >= Errors.REPORT_MIN_FAILS
 }
 
