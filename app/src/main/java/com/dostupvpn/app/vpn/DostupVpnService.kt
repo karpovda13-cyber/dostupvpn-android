@@ -68,13 +68,23 @@ class DostupVpnService : VpnService() {
         var running = false
             private set
 
-        /** После неудачного heartbeat повторяем быстрее обычного — сеть могла просто ещё не проснуться. */
-        private const val HEARTBEAT_RETRY_MS = 15_000L
+        /**
+         * После неудачного heartbeat повторяем быстро — сеть могла просто ещё не проснуться: 2, 4, 8 с,
+         * дальше каждые 15 с. Возвращение сети всё равно прерывает ожидание (см. [wake]).
+         */
+        private val HEARTBEAT_RETRY_STEPS_MS = longArrayOf(2_000L, 4_000L, 8_000L, 15_000L)
 
         /** Несколько событий пробуждения подряд (экран, разблокировка, сеть) дают одну проверку, а не три. */
-        private const val MIN_WAKE_GAP_MS = 15_000L
-        private const val RENEW_BACKOFF_STEP_MS = 5_000L
-        private const val RENEW_BACKOFF_MAX_MS = 60_000L
+        private const val MIN_WAKE_GAP_MS = 5_000L
+        private const val RENEW_BACKOFF_STEP_MS = 2_000L
+        private const val RENEW_BACKOFF_MAX_MS = 30_000L
+
+        /**
+         * Если с прошлого включения экрана телефон провёл в глубоком сне дольше этого, соединения до сервера
+         * и приложений, скорее всего, «забыты» NAT оператора/роутера. Ждать их таймаутов минутами не нужно:
+         * при включении экрана ядро перезапускается (то же, что «выключить и включить»), и всё идёт заново.
+         */
+        private const val SOFT_RESET_AFTER_SLEEP_MS = 120_000L
         private const val MAX_CORE_LOG_BYTES = 1_000_000L
     }
 
@@ -85,6 +95,24 @@ class DostupVpnService : VpnService() {
     private var sessionStartedAt = 0L
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var wakeReceiver: BroadcastReceiver? = null
+
+    /** Конфиг текущей сессии — нужен для быстрого перезапуска ядра без запроса новой сессии. */
+    @Volatile
+    private var lastConfig: String? = null
+
+    /** Сеть, по которой работали до сих пор. Если она сменилась (Wi-Fi <-> LTE), старые соединения мертвы. */
+    @Volatile
+    private var lastNetwork: Network? = null
+
+    /** Выставляются слушателями и сбрасываются проверкой в [startHeartbeat]. */
+    @Volatile
+    private var networkSwitched = false
+
+    @Volatile
+    private var screenWake = false
+
+    /** Сколько миллисекунд устройство провело в глубоком сне с начала загрузки (на момент последней проверки). */
+    private var sleepBaselineMs = 0L
 
     /** Сигнал «проснуться и проверить связь сейчас» (например, вернулась сеть). */
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -149,6 +177,10 @@ class DostupVpnService : VpnService() {
             core.startLoop(config, pfd.fd)
             if (!core.isRunning) error("ядро Xray не запустилось, см. xray.log")
             controller = core
+            lastConfig = config
+            networkSwitched = false
+            screenWake = false
+            sleepBaselineMs = deepSleepMs()
             EventLog.add(this, "Ядро Xray запущено")
 
             val at = if (startedAt > 0L) startedAt else System.currentTimeMillis()
@@ -257,10 +289,14 @@ class DostupVpnService : VpnService() {
         stopSelf()
     }
 
+    /** Время глубокого сна (CPU выключен) с начала загрузки: elapsedRealtime идёт во сне, uptimeMillis — нет. */
+    private fun deepSleepMs(): Long = SystemClock.elapsedRealtime() - SystemClock.uptimeMillis()
+
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = serviceScope.launch {
             var waitMs = heartbeatSec * 1000L
+            var failures = 0
             var lastAttempt = 0L   // SystemClock.elapsedRealtime(): идёт и во время сна, в отличие от таймеров корутин
             while (isActive) {
                 // Ждём либо таймер, либо сигнал пробуждения (экран, разблокировка, выход из Doze, сеть).
@@ -268,7 +304,8 @@ class DostupVpnService : VpnService() {
                 // откладывалась бы на оставшуюся часть интервала.
                 val woken = withTimeoutOrNull(waitMs) { wake.receive(); true } ?: false
                 val now = SystemClock.elapsedRealtime()
-                if (woken && lastAttempt != 0L && now - lastAttempt < MIN_WAKE_GAP_MS) continue
+                val pending = networkSwitched || screenWake
+                if (woken && !pending && lastAttempt != 0L && now - lastAttempt < MIN_WAKE_GAP_MS) continue
                 if (woken && lastAttempt != 0L && now - lastAttempt > 60_000L) {
                     EventLog.add(this@DostupVpnService, "Пробуждение: проверяю сессию (прошло ${(now - lastAttempt) / 1000} с)")
                 }
@@ -277,6 +314,7 @@ class DostupVpnService : VpnService() {
                 try {
                     api.heartbeat()
                     waitMs = heartbeatSec * 1000L
+                    failures = 0
                 } catch (e: ApiException) {
                     when (e.status) {
                         410 -> {           // сервер удалил конфиг (долго не было heartbeat) — создаём новый
@@ -290,16 +328,50 @@ class DostupVpnService : VpnService() {
                         }
                         else -> {
                             Log.w(TAG, "heartbeat error: ${e.message}")
-                            waitMs = HEARTBEAT_RETRY_MS
+                            waitMs = retryDelay(failures++)
                         }
                     }
+                    continue
                 } catch (e: Exception) {
                     // Нет сети (телефон только проснулся и т.п.): туннель не трогаем, повторим скоро.
                     Log.w(TAG, "heartbeat network error", e)
-                    waitMs = HEARTBEAT_RETRY_MS
+                    waitMs = retryDelay(failures++)
+                    continue
+                }
+
+                // Сессия на сервере жива. Теперь — не «забыли» ли соединения, пока телефон спал или менялась сеть.
+                val switched = networkSwitched
+                val screen = screenWake
+                networkSwitched = false
+                screenWake = false
+                if (!switched && !screen) continue
+                val current = deepSleepMs()
+                val sleptMs = current - sleepBaselineMs
+                sleepBaselineMs = current
+                val reason = when {
+                    switched -> "сменилась сеть"
+                    sleptMs >= SOFT_RESET_AFTER_SLEEP_MS -> "телефон спал ${sleptMs / 1000} с"
+                    else -> null
+                }
+                if (reason != null) {
+                    softRestart(reason)
+                    return@launch
                 }
             }
         }
+    }
+
+    private fun retryDelay(failures: Int): Long =
+        HEARTBEAT_RETRY_STEPS_MS[failures.coerceAtMost(HEARTBEAT_RETRY_STEPS_MS.lastIndex)]
+
+    /**
+     * Перезапуск ядра с тем же конфигом, без новой сессии: старые соединения обрываются сразу
+     * (приложения тут же открывают новые), а не висят до своих таймаутов.
+     */
+    private fun softRestart(reason: String) {
+        val config = lastConfig ?: return
+        EventLog.add(this, "Перезапуск туннеля: $reason")
+        startTunnel(config, sessionStartedAt)   // сам запустит новый heartbeat
     }
 
     /**
@@ -342,8 +414,12 @@ class DostupVpnService : VpnService() {
     private fun registerNetworkCallback() {
         unregisterNetworkCallback()
         val cm: ConnectivityManager = getSystemService() ?: return
+        lastNetwork = null   // первый вызов после регистрации лишь запоминает текущую сеть
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                val previous = lastNetwork
+                lastNetwork = network
+                if (previous != null && previous != network) networkSwitched = true
                 wake.trySend(Unit)
             }
         }
@@ -371,6 +447,11 @@ class DostupVpnService : VpnService() {
                 if (intent?.action == PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED &&
                     this@DostupVpnService.getSystemService<PowerManager>()?.isDeviceIdleMode == true
                 ) return
+                // Только действия пользователя (экран, разблокировка) — повод перезапускать ядро после сна.
+                // Выход из Doze посреди ночи (окно обслуживания) — лишь проверка сессии.
+                if (intent?.action == Intent.ACTION_SCREEN_ON || intent?.action == Intent.ACTION_USER_PRESENT) {
+                    screenWake = true
+                }
                 wake.trySend(Unit)
             }
         }

@@ -102,6 +102,7 @@ class ApiClient(private val store: SecureStore, context: Context) {
         path: String,
         body: JSONObject? = null,
         auth: Boolean = true,
+        fast: Boolean = false,
     ): JSONObject {
         var lastNetworkError: IOException? = null
         for (ep in endpoints()) {
@@ -125,8 +126,19 @@ class ApiClient(private val store: SecureStore, context: Context) {
             } else {
                 pinned
             }
+            // Для heartbeat: живой сервер отвечает за доли секунды, а ждать мёртвую сеть 45 с незачем —
+            // быстрый отказ даёт быстрый повтор (после пробуждения сеть часто поднимается не сразу).
+            val callClient = if (fast) {
+                client.newBuilder()
+                    .connectTimeout(5, TimeUnit.SECONDS)
+                    .readTimeout(10, TimeUnit.SECONDS)
+                    .callTimeout(12, TimeUnit.SECONDS)
+                    .build()
+            } else {
+                client
+            }
             try {
-                client.newCall(builder.build()).execute().use { resp ->
+                callClient.newCall(builder.build()).execute().use { resp ->
                     val text = resp.body?.string().orEmpty()
                     val json = try {
                         JSONObject(text)
@@ -224,7 +236,7 @@ class ApiClient(private val store: SecureStore, context: Context) {
         request("GET", "/v1/rules?version=$currentVersion", auth = false)
 
     fun heartbeat() {
-        request("POST", "/v1/session/heartbeat")
+        request("POST", "/v1/session/heartbeat", fast = true)
     }
 
     fun sessionStop() {
