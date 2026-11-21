@@ -9,14 +9,9 @@ import com.dostupvpn.app.diag.EventLog
 import com.dostupvpn.app.diag.OtherVpn
 import com.dostupvpn.app.net.ApiClient
 import com.dostupvpn.app.net.ApiException
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Starts/stops the foreground VPN service. The service itself owns the server heartbeat,
@@ -77,9 +72,6 @@ class VpnController(private val context: Context, private val api: ApiClient) {
         EventLog.add(context, "── подключение ──")
         stage("Запрос сессии…")
         sessionStore.clear()
-        // Пока сессия не передана службе, за неё отвечаем мы: при отмене (пользователь нажал «отключить»)
-        // обязаны освободить её на сервере, иначе она повиснет до таймаута.
-        var handedOff = false
         try {
             val session = withContext(Dispatchers.IO) { api.sessionStart() }
             EventLog.add(context, "Сессия создана (heartbeat ${session.heartbeatSec} с)")
@@ -107,7 +99,6 @@ class VpnController(private val context: Context, private val api: ApiClient) {
                     EventLog.add(context, "Правила: не удалось загрузить (${e.javaClass.simpleName}: ${e.message.orEmpty().take(80)})")
                 }
             }
-            currentCoroutineContext().ensureActive()
             EventLog.add(context, "Применяются правила v${AdminRulesStore.version(context)}")
 
             val config = try {
@@ -120,11 +111,6 @@ class VpnController(private val context: Context, private val api: ApiClient) {
             }
 
             stage("Запуск туннеля…")
-            // Если только что нажали «отключить», старый экземпляр службы ещё умирает: его onDestroy снёс бы
-            // новый туннель. Ждём его кончины (не дольше 3 с).
-            withTimeoutOrNull(3_000L) { while (DostupVpnService.stopPending) delay(50) }
-            currentCoroutineContext().ensureActive()
-            handedOff = true
             context.startService(
                 Intent(context, DostupVpnService::class.java)
                     .putExtra(DostupVpnService.EXTRA_CONFIG, config)
@@ -144,9 +130,6 @@ class VpnController(private val context: Context, private val api: ApiClient) {
                 }
             }
             failed(Errors.TIMEOUT)
-        } catch (e: CancellationException) {
-            if (!handedOff) withContext(NonCancellable + Dispatchers.IO) { runCatching { api.sessionStop() } }
-            throw e
         } catch (e: ApiException) {
             failed(Errors.fromApi(e))
         } catch (e: Exception) {
@@ -156,7 +139,6 @@ class VpnController(private val context: Context, private val api: ApiClient) {
 
     fun disconnect(onState: (State) -> Unit) {
         EventLog.add(context, "Отключено пользователем")
-        DostupVpnService.notifyStopRequested()
         context.startService(Intent(context, DostupVpnService::class.java).setAction(DostupVpnService.ACTION_STOP))
         sessionStore.clear()
         onState(State.Disconnected)

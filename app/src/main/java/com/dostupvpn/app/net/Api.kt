@@ -18,7 +18,6 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.withLock
 
 private fun JSONObject.strOrNull(name: String): String? = if (isNull(name)) null else getString(name)
 
@@ -51,14 +50,18 @@ class ApiClient(private val store: SecureStore, context: Context) {
                 caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                     !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
             }
-            .sortedBy { (_, caps) ->
-                when {
+            // Не выбираем просто первый Wi-Fi: он может быть подключён, но без
+            // доступа в интернет. Сначала предпочитаем сеть, которую Android
+            // признал проверенной (VALIDATED), затем тип транспорта.
+            .sortedWith(compareBy<Pair<Network, NetworkCapabilities>>(
+                { (_, caps) -> if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 0 else 1 },
+                { (_, caps) -> when {
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 0
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 2
                     else -> 3
-                }
-            }
+                } },
+            ))
             .map { it.first }
             .firstOrNull()
     }
@@ -212,9 +215,7 @@ class ApiClient(private val store: SecureStore, context: Context) {
 
     // ── Методы для этапа подключения VPN (пока не используются интерфейсом) ──
 
-    fun sessionStart(): SessionInfo = sessionLock.withLock { sessionStartLocked() }
-
-    private fun sessionStartLocked(): SessionInfo {
+    fun sessionStart(): SessionInfo {
         val j = request("POST", "/v1/session/start")
         val ep = j.getJSONObject("endpoint")
         val v = j.getJSONObject("vless")
@@ -242,13 +243,7 @@ class ApiClient(private val store: SecureStore, context: Context) {
         request("POST", "/v1/session/heartbeat", fast = true)
     }
 
-    /** Запоздавший stop старой сессии не должен прийти на сервер после start новой и убить её. */
     fun sessionStop() {
-        sessionLock.withLock { request("POST", "/v1/session/stop") }
-    }
-
-    private companion object {
-        /** Честная (FIFO) блокировка на весь процесс: start/stop идут на сервер строго в порядке вызова. */
-        val sessionLock = java.util.concurrent.locks.ReentrantLock(true)
+        request("POST", "/v1/session/stop")
     }
 }
