@@ -18,6 +18,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.withLock
 
 private fun JSONObject.strOrNull(name: String): String? = if (isNull(name)) null else getString(name)
 
@@ -211,7 +212,9 @@ class ApiClient(private val store: SecureStore, context: Context) {
 
     // ── Методы для этапа подключения VPN (пока не используются интерфейсом) ──
 
-    fun sessionStart(): SessionInfo {
+    fun sessionStart(): SessionInfo = sessionLock.withLock { sessionStartLocked() }
+
+    private fun sessionStartLocked(): SessionInfo {
         val j = request("POST", "/v1/session/start")
         val ep = j.getJSONObject("endpoint")
         val v = j.getJSONObject("vless")
@@ -239,7 +242,13 @@ class ApiClient(private val store: SecureStore, context: Context) {
         request("POST", "/v1/session/heartbeat", fast = true)
     }
 
+    /** Запоздавший stop старой сессии не должен прийти на сервер после start новой и убить её. */
     fun sessionStop() {
-        request("POST", "/v1/session/stop")
+        sessionLock.withLock { request("POST", "/v1/session/stop") }
+    }
+
+    private companion object {
+        /** Честная (FIFO) блокировка на весь процесс: start/stop идут на сервер строго в порядке вызова. */
+        val sessionLock = java.util.concurrent.locks.ReentrantLock(true)
     }
 }

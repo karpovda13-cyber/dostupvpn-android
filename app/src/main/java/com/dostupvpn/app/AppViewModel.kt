@@ -17,6 +17,7 @@ import com.dostupvpn.app.net.Me
 import com.dostupvpn.app.ui.ThemeMode
 import com.dostupvpn.app.vpn.VpnController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,6 +64,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // Пока идёт подключение по нажатию кнопки, состояние ведёт сам контроллер — не мешаем ему.
     @Volatile
     private var connectInProgress = false
+
+    /** Единственная живая попытка подключения. «Отключить» её отменяет, повторное «Подключить» не плодит вторую. */
+    private var connectJob: Job? = null
 
     private val sessionListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         if (!connectInProgress) setVpn(vpnController.currentState())
@@ -147,18 +151,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleVpn(enable: Boolean) {
         if (!enable) {
+            cancelConnect()
             vpnController.disconnect(::setVpn)
             return
         }
+        val previous = connectJob
+        if (previous?.isActive == true) return   // подключение уже идёт: повторное нажатие ничего не меняет
         _ui.update { it.copy(crash = null, error = null) }
         connectInProgress = true
-        viewModelScope.launch {
+        connectJob = viewModelScope.launch {
             try {
+                // Отменённая предыдущая попытка должна успеть освободить свою сессию на сервере,
+                // иначе её запоздалый stop убил бы сессию этой попытки.
+                previous?.join()
                 vpnController.connect(::setVpn)
             } finally {
-                connectInProgress = false
+                // Флаг сбрасывает только последняя попытка: отменённая предыдущая не должна гасить флаг новой.
+                if (connectJob === this.coroutineContext[Job]) connectInProgress = false
             }
         }
+    }
+
+    private fun cancelConnect() {
+        connectJob?.cancel()
     }
 
     /** Пользователь закрыл карточку с ошибкой. */
@@ -175,6 +190,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Выход освобождает слот на сервере. Без связи выйти нельзя — иначе слот остался бы занятым. */
     fun logout() {
+        cancelConnect()
         vpnController.disconnect(::setVpn)
         viewModelScope.launch {
             _ui.update { it.copy(busy = true, error = null) }
